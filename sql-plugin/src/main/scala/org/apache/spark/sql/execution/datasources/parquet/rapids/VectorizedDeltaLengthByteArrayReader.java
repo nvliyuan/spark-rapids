@@ -78,12 +78,16 @@ public class VectorizedDeltaLengthByteArrayReader extends VectorizedReaderBase i
 
 	@Override
 	public void skipBinary(int total) {
-		for (int i = 0; i < total; i++) {
-			int remaining = lengthsVector.getInt(currentRow + i);
-			while (remaining > 0) {
-				remaining -= in.skip(remaining);
+		try {
+			for (int i = 0; i < total; i++) {
+				int remaining = lengthsVector.getInt(currentRow + i);
+				while (remaining > 0) {
+					remaining -= in.skip(remaining);
+				}
 			}
+			currentRow += total;
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
 		}
-		currentRow += total;
 	}
 }

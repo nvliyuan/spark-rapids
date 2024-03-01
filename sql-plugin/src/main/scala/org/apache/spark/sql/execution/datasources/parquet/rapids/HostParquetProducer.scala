@@ -123,7 +123,7 @@ class HostParquetProducer(
 
     val rowGroupBuilder = mutable.ArrayBuffer.empty[PageReadStore]
     do {
-      rowGroupBuilder += pageReader.readNextFilteredRowGroup()
+      rowGroupBuilder += pageReader.readNextRowGroup()
     } while (rowGroupBuilder.last != null)
     val rowGroups = rowGroupBuilder.dropRight(1).toArray
 

@@ -127,7 +127,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipIntegers(int total) {
-		in.skip(total * 4L);
+		try {
+			in.skip(total * 4L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -188,7 +192,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipLongs(int total) {
-		in.skip(total * 8L);
+		try {
+			in.skip(total * 8L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -224,7 +232,7 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 				for (int i = 0; i < total; i += 1) {
 					c.putLong(
 							rowId + i,
-							RebaseDateTime.rebaseJulianToGregorianMicros(timeZone, buffer.getLong()));
+							RebaseDateTime.rebaseJulianToGregorianMicros(buffer.getLong()));
 				}
 			}
 		} else {
@@ -256,7 +264,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipFloats(int total) {
-		in.skip(total * 4L);
+		try {
+			in.skip(total * 4L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -276,7 +288,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipDoubles(int total) {
-		in.skip(total * 8L);
+		try {
+			in.skip(total * 8L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -295,7 +311,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public final void skipBytes(int total) {
-		in.skip(total * 4L);
+		try {
+			in.skip(total * 4L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -310,7 +330,11 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipShorts(int total) {
-		in.skip(total * 4L);
+		try {
+			in.skip(total * 4L);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 
 	@Override
@@ -374,9 +398,13 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipBinary(int total) {
-		for (int i = 0; i < total; i++) {
-			int len = readInteger();
-			in.skip(len);
+		try {
+			for (int i = 0; i < total; i++) {
+				int len = readInteger();
+				in.skip(len);
+			}
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
 		}
 	}
 
@@ -395,6 +423,10 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 
 	@Override
 	public void skipFixedLenByteArray(int total, int len) {
-		in.skip(total * (long) len);
+		try {
+			in.skip(total * (long) len);
+		} catch (IOException e) {
+			throw new ParquetDecodingException("Failed to read from input stream", e);
+		}
 	}
 }
