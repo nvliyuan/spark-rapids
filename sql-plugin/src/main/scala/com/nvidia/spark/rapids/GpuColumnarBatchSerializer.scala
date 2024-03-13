@@ -100,7 +100,7 @@ class SerializedBatchIterator(headerSize: Int, hostDataBatchSize: Long, in: Inpu
             batchBuffer.foreach(_.safeClose())
             val hmb = HostMemoryBuffer.allocate(hostDataBatchSize)
             batchBuffer = Some(hmb)
-            batchBufferOffset = dataLen
+            batchBufferOffset = 0
             hmb
           } else {
             batchBuffer.get
