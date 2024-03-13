@@ -22,11 +22,11 @@ import java.util.Locale
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.io.{ColumnIO, ColumnIOFactory, GroupColumnIO, PrimitiveColumnIO}
 import org.apache.parquet.schema._
-import org.apache.parquet.schema.LogicalTypeAnnotation._
+import org.apache.parquet.schema.OriginalType._
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName._
 import org.apache.parquet.schema.Type.Repetition._
 
-import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.execution.datasources.parquet.ParquetSchemaConverter
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -67,13 +67,6 @@ class ParquetToSparkSchemaConverter(
     assumeBinaryIsString = conf.get(SQLConf.PARQUET_BINARY_AS_STRING.key).toBoolean,
     assumeInt96IsTimestamp = conf.get(SQLConf.PARQUET_INT96_AS_TIMESTAMP.key).toBoolean,
     caseSensitive = conf.get(SQLConf.CASE_SENSITIVE.key).toBoolean)
-
-  /**
-   * Returns true if TIMESTAMP_NTZ type is enabled in this ParquetToSparkSchemaConverter.
-   */
-  def isTimestampNTZEnabled(): Boolean = {
-    inferTimestampNTZ
-  }
 
   /**
    * Converts Parquet [[MessageType]] `parquetSchema` to a Spark SQL [[StructType]].
@@ -136,7 +129,7 @@ class ParquetToSparkSchemaConverter(
         fieldReadType = fieldReadType.flatMap {
           case at: ArrayType => Some(at.elementType)
           case _ =>
-            throw QueryCompilationErrors.illegalParquetTypeError(groupColumn.toString)
+            throw new AnalysisException(groupColumn.toString)
         }
       }
 
@@ -189,26 +182,29 @@ class ParquetToSparkSchemaConverter(
       primitiveColumn: PrimitiveColumnIO,
       sparkReadType: Option[DataType]): ParquetColumn = {
     val parquetType = primitiveColumn.getType.asPrimitiveType()
-    val typeAnnotation = primitiveColumn.getType.getLogicalTypeAnnotation
+    val originalType = primitiveColumn.getType.getOriginalType
     val typeName = primitiveColumn.getPrimitive
 
     def typeString =
-      if (typeAnnotation == null) s"$typeName" else s"$typeName ($typeAnnotation)"
+      if (originalType == null) s"$typeName" else s"$typeName ($originalType)"
+
+    def typeNotSupported() =
+      throw new AnalysisException(s"Parquet type not supported: $typeString")
 
     def typeNotImplemented() =
-      throw QueryCompilationErrors.parquetTypeUnsupportedYetError(typeString)
+      throw new AnalysisException(s"Parquet type not yet supported: $typeString")
 
     def illegalType() =
-      throw QueryCompilationErrors.illegalParquetTypeError(typeString)
+      throw new AnalysisException(s"Illegal Parquet type: $typeString")
 
     // When maxPrecision = -1, we skip precision range check, and always respect the precision
     // specified in field.getDecimalMetadata.  This is useful when interpreting decimal types stored
     // as binaries with variable lengths.
     def makeDecimalType(maxPrecision: Int = -1): DecimalType = {
-      val decimalLogicalTypeAnnotation = typeAnnotation
-        .asInstanceOf[DecimalLogicalTypeAnnotation]
-      val precision = decimalLogicalTypeAnnotation.getPrecision
-      val scale = decimalLogicalTypeAnnotation.getScale
+      //noinspection ScalaDeprecation
+      val precision = parquetType.getDecimalMetadata.getPrecision
+      //noinspection ScalaDeprecation
+      val scale = parquetType.getDecimalMetadata.getScale
 
       ParquetSchemaConverter.checkConversionRequirement(
         maxPrecision == -1 || 1 <= precision && precision <= maxPrecision,
@@ -225,57 +221,26 @@ class ParquetToSparkSchemaConverter(
       case DOUBLE => DoubleType
 
       case INT32 =>
-        typeAnnotation match {
-          case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 8 => ByteType
-              case 16 => ShortType
-              case 32 => IntegerType
-              case _ => illegalType()
-            }
-          case null => IntegerType
-          case _: DateLogicalTypeAnnotation => DateType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_INT_DIGITS)
-          case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 8 => ShortType
-              case 16 => IntegerType
-              case 32 => LongType
-              case _ => illegalType()
-            }
-          case t: TimestampLogicalTypeAnnotation if t.getUnit == TimeUnit.MILLIS =>
-            typeNotImplemented()
+        originalType match {
+          case INT_8 => ByteType
+          case INT_16 => ShortType
+          case INT_32 | null => IntegerType
+          case DATE => DateType
+          case DECIMAL => makeDecimalType(Decimal.MAX_INT_DIGITS)
+          case UINT_8 => typeNotSupported()
+          case UINT_16 => typeNotSupported()
+          case UINT_32 => typeNotSupported()
+          case TIME_MILLIS => typeNotImplemented()
           case _ => illegalType()
         }
 
       case INT64 =>
-        typeAnnotation match {
-          case intTypeAnnotation: IntLogicalTypeAnnotation if intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              case 64 => LongType
-              case _ => illegalType()
-            }
-          case null => LongType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType(Decimal.MAX_LONG_DIGITS)
-          case intTypeAnnotation: IntLogicalTypeAnnotation if !intTypeAnnotation.isSigned =>
-            intTypeAnnotation.getBitWidth match {
-              // The precision to hold the largest unsigned long is:
-              // `java.lang.Long.toUnsignedString(-1).length` = 20
-              case 64 => DecimalType(20, 0)
-              case _ => illegalType()
-            }
-          case timestamp: TimestampLogicalTypeAnnotation
-            if timestamp.getUnit == TimeUnit.MICROS || timestamp.getUnit == TimeUnit.MILLIS =>
-            if (timestamp.isAdjustedToUTC || !inferTimestampNTZ) {
-              TimestampType
-            } else {
-              TimestampNTZType
-            }
-          // SPARK-40819: NANOS are not supported as a Timestamp, convert to LongType without
-          // timezone awareness to address behaviour regression introduced by SPARK-34661
-          case timestamp: TimestampLogicalTypeAnnotation
-            if timestamp.getUnit == TimeUnit.NANOS && nanosAsLong =>
-            LongType
+        originalType match {
+          case INT_64 | null => LongType
+          case DECIMAL => makeDecimalType(Decimal.MAX_LONG_DIGITS)
+          case UINT_64 => typeNotSupported()
+          case TIMESTAMP_MICROS => TimestampType
+          case TIMESTAMP_MILLIS => TimestampType
           case _ => illegalType()
         }
 
@@ -287,22 +252,19 @@ class ParquetToSparkSchemaConverter(
         TimestampType
 
       case BINARY =>
-        typeAnnotation match {
-          case _: StringLogicalTypeAnnotation | _: EnumLogicalTypeAnnotation |
-               _: JsonLogicalTypeAnnotation => StringType
+        originalType match {
+          case UTF8 | ENUM | JSON => StringType
           case null if assumeBinaryIsString => StringType
           case null => BinaryType
-          case _: BsonLogicalTypeAnnotation => BinaryType
-          case _: DecimalLogicalTypeAnnotation => makeDecimalType()
+          case BSON => BinaryType
+          case DECIMAL => makeDecimalType()
           case _ => illegalType()
         }
 
       case FIXED_LEN_BYTE_ARRAY =>
-        typeAnnotation match {
-          case _: DecimalLogicalTypeAnnotation =>
-            makeDecimalType(Decimal.maxPrecisionForBytes(parquetType.getTypeLength))
-          case _: IntervalLogicalTypeAnnotation => typeNotImplemented()
-          case null => BinaryType
+        originalType match {
+          case DECIMAL => makeDecimalType(Decimal.maxPrecisionForBytes(parquetType.getTypeLength))
+          case INTERVAL => typeNotImplemented()
           case _ => illegalType()
         }
 
@@ -316,7 +278,7 @@ class ParquetToSparkSchemaConverter(
       groupColumn: GroupColumnIO,
       sparkReadType: Option[DataType]): ParquetColumn = {
     val field = groupColumn.getType.asGroupType()
-    Option(field.getLogicalTypeAnnotation).fold(
+    Option(field.getOriginalType).fold(
       convertInternal(groupColumn, sparkReadType.map(_.asInstanceOf[StructType]))) {
       // A Parquet list is represented as a 3-level structure:
       //
@@ -331,7 +293,7 @@ class ParquetToSparkSchemaConverter(
       // we need to check whether the 2nd level or the 3rd level refers to list element type.
       //
       // See: https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#lists
-      case _: ListLogicalTypeAnnotation =>
+      case LIST =>
         ParquetSchemaConverter.checkConversionRequirement(
           field.getFieldCount == 1, s"Invalid list type $field")
         ParquetSchemaConverter.checkConversionRequirement(
@@ -370,7 +332,7 @@ class ParquetToSparkSchemaConverter(
       // `MAP_KEY_VALUE` is for backwards-compatibility
       // See: https://github.com/apache/parquet-format/blob/master/LogicalTypes.md#backward-compatibility-rules-1
       // scalastyle:on
-      case _: MapLogicalTypeAnnotation | _: MapKeyValueTypeAnnotation =>
+      case MAP | MAP_KEY_VALUE =>
         ParquetSchemaConverter.checkConversionRequirement(
           field.getFieldCount == 1 && !field.getType(0).isPrimitive,
           s"Invalid map type: $field")
@@ -398,7 +360,7 @@ class ParquetToSparkSchemaConverter(
             valueContainsNull = valueOptional),
           groupColumn, Seq(convertedKey, convertedValue))
       case _ =>
-        throw QueryCompilationErrors.unrecognizedParquetTypeError(field.toString)
+        throw new AnalysisException(field.toString)
     }
   }
 

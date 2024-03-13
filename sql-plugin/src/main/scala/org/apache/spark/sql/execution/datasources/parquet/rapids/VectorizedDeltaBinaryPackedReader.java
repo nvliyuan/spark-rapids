@@ -186,7 +186,7 @@ public class VectorizedDeltaBinaryPackedReader extends VectorizedReaderBase {
 				if (failIfRebase) {
 					throw DataSourceUtils.newRebaseExceptionInRead("Parquet");
 				} else {
-					w.putLong(r, RebaseDateTime.rebaseJulianToGregorianMicros(timeZone, v));
+					w.putLong(r, RebaseDateTime.rebaseJulianToGregorianMicros(v));
 				}
 			} else {
 				w.putLong(r, v);

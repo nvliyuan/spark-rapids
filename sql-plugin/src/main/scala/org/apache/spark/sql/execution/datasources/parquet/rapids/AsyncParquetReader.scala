@@ -100,10 +100,10 @@ class AsyncParquetReader(
 
   private lazy val rowGroupQueue: mutable.Queue[PageReadStore] = {
     val rowGroups = mutable.Queue.empty[PageReadStore]
-    var curRowGroup: PageReadStore = pageReader.readNextFilteredRowGroup()
+    var curRowGroup: PageReadStore = pageReader.readNextRowGroup()
     while (curRowGroup != null) {
       rowGroups += curRowGroup;
-      curRowGroup = pageReader.readNextFilteredRowGroup()
+      curRowGroup = pageReader.readNextRowGroup()
     }
     rowGroups
   }
