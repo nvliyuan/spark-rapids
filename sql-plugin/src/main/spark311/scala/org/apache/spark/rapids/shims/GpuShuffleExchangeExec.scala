@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2020-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,7 +39,7 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuPartitioning
+import com.nvidia.spark.rapids.{GpuPartitioning, RapidsConf}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
@@ -53,8 +53,9 @@ case class GpuShuffleExchangeExec(
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin,
     advisoryPartitionSize: Option[Long] = None)(
-    cpuOutputPartitioning: Partitioning)
-    extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child)
+    cpuOutputPartitioning: Partitioning,
+    rapidsConf: RapidsConf)
+    extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child, rapidsConf)
         with ShuffleExchangeLike {
 
   override def otherCopyArgs: Seq[AnyRef] = cpuOutputPartitioning :: Nil

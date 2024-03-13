@@ -108,7 +108,7 @@ class HostShuffleCoalesceIterator(
 
   def concatenateTablesInHost(): HostConcatResult = {
     val result = withResource(new MetricRange(concatTimeMetric)) { _ =>
-      val firstHeader = serializedTables.peekFirst().header
+      val firstTable = serializedTables.peekFirst().header
       if (firstHeader.getNumColumns == 0) {
         (0 until numTablesInBatch).foreach(_ => serializedTables.removeFirst())
         cudf_utils.HostConcatResultUtil.rowsOnlyHostConcatResult(numRowsInBatch)
@@ -151,7 +151,7 @@ class HostShuffleCoalesceIterator(
           if (batch.numRows > 0) {
             inputRowsMetric += batch.numRows()
             val tableColumn = batch.column(0).asInstanceOf[SerializedTableColumn]
-            batchCanGrow = canAddToBatch(tableColumn.header)
+            batchCanGrow = canAddToBatch(tableColumn)
             serializedTables.addLast(tableColumn)
             // always add the first table to the batch even if its beyond the target limits
             if (batchCanGrow || numTablesInBatch == 0) {
@@ -179,14 +179,9 @@ class HostShuffleCoalesceIterator(
     concatenateTablesInHost()
   }
 
-  private def canAddToBatch(nextTable: SerializedTableHeader): Boolean = {
-    if (batchByteSize + nextTable.getDataLen > targetBatchByteSize) {
-      return false
-    }
-    if (numRowsInBatch.toLong + nextTable.getNumRows > Integer.MAX_VALUE) {
-      return false
-    }
-    true
+  private def canAddToBatch(nextTable: SerializedTableColumn): Boolean = {
+    batchByteSize + nextTable.hostBuffer.getLength <= targetBatchByteSize &&
+      numRowsInBatch.toLong + nextTable.numRows <= Integer.MAX_VALUE
   }
 }
 

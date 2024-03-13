@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,73 +18,109 @@ package com.nvidia.spark.rapids
 
 import java.io._
 import java.nio.ByteBuffer
+import java.nio.channels.Channels
 
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 
 import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
-import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
 
 import org.apache.spark.TaskContext
 import org.apache.spark.serializer.{DeserializationStream, SerializationStream, Serializer, SerializerInstance}
-import org.apache.spark.sql.types.NullType
+import org.apache.spark.sql.types.{ArrayType, DataType, MapType, NullType, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-class SerializedBatchIterator(dIn: DataInputStream)
+class SerializedBatchIterator(headerSize: Int, hostDataBatchSize: Long, in: InputStream)
   extends Iterator[(Int, ColumnarBatch)] {
-  private[this] var nextHeader: Option[SerializedTableHeader] = None
+  private[this] val channel = Channels.newChannel(in)
+  private[this] var nextHeader: Option[HostMemoryBuffer] = None
+  private[this] var batchBuffer: Option[HostMemoryBuffer] = None
+  private[this] var batchBufferOffset: Long = 0L
   private[this] var toBeReturned: Option[ColumnarBatch] = None
   private[this] var streamClosed: Boolean = false
 
   // Don't install the callback if in a unit test
   Option(TaskContext.get()).foreach { tc =>
     onTaskCompletion(tc) {
-      toBeReturned.foreach(_.close())
+      nextHeader.foreach(_.safeClose())
+      nextHeader = None
+      batchBuffer.foreach(_.safeClose())
+      batchBuffer = None
+      toBeReturned.foreach(_.safeClose())
       toBeReturned = None
-      dIn.close()
+      if (!streamClosed) {
+        channel.close()
+        streamClosed = true
+      }
     }
   }
 
-  def tryReadNextHeader(): Option[Long] = {
-    if (streamClosed){
-      None
-    } else {
-      if (nextHeader.isEmpty) {
-        withResource(new NvtxRange("Read Header", NvtxColor.YELLOW)) { _ =>
-          val header = new SerializedTableHeader(dIn)
-          if (header.wasInitialized) {
-            nextHeader = Some(header)
-          } else {
-            dIn.close()
-            streamClosed = true
-            nextHeader = None
+  def tryReadNextHeader(): Unit = {
+    if (!streamClosed && nextHeader.isEmpty) {
+      withResource(new NvtxRange("Read Header", NvtxColor.YELLOW)) { _ =>
+        var atEOF = false
+        val hmb = new HostMemoryBuffer(headerSize, false)
+        closeOnExcept(hmb) { _ =>
+          val bb = hmb.asByteBuffer()
+          while (!atEOF && bb.hasRemaining) {
+            if (channel.read(bb) == -1) {
+              if (bb.position != 0) {
+                throw new EOFException("Unexpected EOF while reading batch header")
+              } else {
+                atEOF = true
+              }
+            }
           }
+        }
+        if (atEOF) {
+          hmb.safeClose()
+          channel.close()
+          streamClosed = true
+        } else {
+          nextHeader = Some(hmb)
         }
       }
-      nextHeader.map(_.getDataLen)
     }
   }
 
-  def tryReadNext(): Option[ColumnarBatch] = {
-    if (nextHeader.isEmpty) {
-      None
-    } else {
-      withResource(new NvtxRange("Read Batch", NvtxColor.YELLOW)) { _ =>
-        val header = nextHeader.get
-        if (header.getNumColumns > 0) {
-          // This buffer will later be concatenated into another host buffer before being
-          // sent to the GPU, so no need to use pinned memory for these buffers.
-          closeOnExcept(
-            HostMemoryBuffer.allocate(header.getDataLen, false)) { hostBuffer =>
-            JCudfSerialization.readTableIntoBuffer(dIn, header, hostBuffer)
-            Some(SerializedTableColumn.from(header, hostBuffer))
-          }
+  private def tryReadNext(): Option[ColumnarBatch] = nextHeader.map { header =>
+    withResource(new NvtxRange("Read Batch", NvtxColor.YELLOW)) { _ =>
+      val numColumns = getNumColumns(header)
+      val numRows = getNumRows(header)
+      if (numColumns > 0) {
+        val dataLen = getDataLen(header)
+        val hmb: HostMemoryBuffer = if (dataLen > hostDataBatchSize) {
+          // large batches get dedicated buffers
+          HostMemoryBuffer.allocate(dataLen)
         } else {
-          Some(SerializedTableColumn.from(header))
+          val buf = if (batchBuffer.isEmpty || batchBufferOffset + dataLen > hostDataBatchSize) {
+            batchBuffer.foreach(_.safeClose())
+            val hmb = HostMemoryBuffer.allocate(hostDataBatchSize)
+            batchBuffer = Some(hmb)
+            batchBufferOffset = dataLen
+            hmb
+          } else {
+            batchBuffer.get
+          }
+          val hmb = buf.slice(batchBufferOffset, dataLen)
+          batchBufferOffset += dataLen
+          hmb
         }
+        closeOnExcept(hmb) { _ =>
+          new HostByteBufferIterator(hmb).foreach { bb =>
+            while (bb.hasRemaining) {
+              if (channel.read(bb) == -1) {
+                throw new EOFException("Unexpected EOF while reading columnar data")
+              }
+            }
+          }
+          SerializedTableColumn.from(header, numColumns, numRows, hmb)
+        }
+      } else {
+        SerializedTableColumn.from(header, numColumns, numRows)
       }
     }
   }
@@ -107,7 +143,29 @@ class SerializedBatchIterator(dIn: DataInputStream)
     nextHeader = None
     (0, ret)
   }
+
+  private def getNumColumns(header: HostMemoryBuffer): Int = {
+    // HACK: This knows too much about the JCudfSerialization format
+    // read big-endian int from table header for number of columns
+    val x = header.getInt(6)
+    java.lang.Integer.reverseBytes(x)
+  }
+
+  private def getNumRows(header: HostMemoryBuffer): Int = {
+    // HACK: This knows too much about the JCudfSerialization format
+    // read big-endian int from table header for number of rows
+    val x = header.getInt(10)
+    java.lang.Integer.reverseBytes(x)
+  }
+
+  private def getDataLen(header: HostMemoryBuffer): Long = {
+    // HACK: This knows too much about the JCudfSerialization format
+    // read big-endian size as long at end of header
+    val x = header.getLong(headerSize - 8)
+    java.lang.Long.reverseBytes(x)
+  }
 }
+
 /**
  * Serializer for serializing `ColumnarBatch`s for use during normal shuffle.
  *
@@ -124,14 +182,53 @@ class SerializedBatchIterator(dIn: DataInputStream)
  *
  * @note The RAPIDS shuffle does not use this code.
  */
-class GpuColumnarBatchSerializer(dataSize: GpuMetric)
+class GpuColumnarBatchSerializer(
+    schema: Array[DataType],
+    hostDataBatchSize: Long,
+    dataSize: GpuMetric)
     extends Serializer with Serializable {
+  private val headerSize = computeHeaderSize(schema)
+
   override def newInstance(): SerializerInstance =
-    new GpuColumnarBatchSerializerInstance(dataSize)
+    new GpuColumnarBatchSerializerInstance(headerSize, hostDataBatchSize, dataSize)
+
   override def supportsRelocationOfSerializedObjects: Boolean = true
+
+  private def computeHeaderSize(schema: Array[DataType]): Int = {
+    // HACK: This is too tightly coupled with JCudfSerialization implementation
+    // table header always has:
+    // - 4-byte magic number
+    // - 2-byte version number
+    // - 4-byte column count
+    // - 4-byte row count
+    // - 8-byte data buffer length
+    val tableHeader = 4 + 2 + 4 + 4 + 8;
+    tableHeader + schema.map(computeHeaderSize).sum
+  }
+
+  private def computeHeaderSize(dt: DataType): Int = {
+    // column header always has:
+    // - 4-byte type ID
+    // - 4-byte type scale
+    // - 4-byte null count
+    val size = 12
+    val childrenSize = dt match {
+      case s: StructType =>
+        s.map(f => computeHeaderSize(f.dataType)).sum
+      case a: ArrayType =>
+        computeHeaderSize(a.elementType)
+      case m: MapType =>
+        computeHeaderSize(m.keyType) + computeHeaderSize(m.valueType)
+      case _ => 0
+    }
+    size + childrenSize
+  }
 }
 
-private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends SerializerInstance {
+private class GpuColumnarBatchSerializerInstance(
+    headerSize: Int,
+    hostDataBatchSize: Long,
+    dataSize: GpuMetric) extends SerializerInstance {
 
   override def serializeStream(out: OutputStream): SerializationStream = new SerializationStream {
     private[this] val dOut: DataOutputStream =
@@ -217,10 +314,8 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends Se
 
   override def deserializeStream(in: InputStream): DeserializationStream = {
     new DeserializationStream {
-      private[this] val dIn: DataInputStream = new DataInputStream(new BufferedInputStream(in))
-
       override def asKeyValueIterator: Iterator[(Int, ColumnarBatch)] = {
-        new SerializedBatchIterator(dIn)
+        new SerializedBatchIterator(headerSize, hostDataBatchSize, in)
       }
 
       override def asIterator: Iterator[Any] = {
@@ -245,7 +340,7 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends Se
       }
 
       override def close(): Unit = {
-        dIn.close()
+        in.close()
       }
     }
   }
@@ -264,12 +359,13 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric) extends Se
  * which should always appear in the query plan immediately after a shuffle.
  */
 class SerializedTableColumn(
-    val header: SerializedTableHeader,
+    val header: HostMemoryBuffer,
+    val numColumns: Int,
+    val numRows: Int,
     val hostBuffer: HostMemoryBuffer) extends GpuColumnVectorBase(NullType) {
   override def close(): Unit = {
-    if (hostBuffer != null) {
-      hostBuffer.close()
-    }
+    header.safeClose()
+    hostBuffer.safeClose()
   }
 
   override def hasNull: Boolean = throw new IllegalStateException("should not be called")
@@ -282,15 +378,32 @@ object SerializedTableColumn {
    * Build a `ColumnarBatch` consisting of a single [[SerializedTableColumn]] describing
    * the specified serialized table.
    *
-   * @param header header for the serialized table
-   * @param hostBuffer host buffer containing the table data
+   * @param header header data for the serialized table
+   * @param numColumns number of columns in the table
+   * @param numRows number of rows in the table
+   * @return columnar batch to be passed to [[GpuShuffleCoalesceExec]]
+   */
+  def from(header: HostMemoryBuffer, numColumns: Int, numRows: Int): ColumnarBatch = {
+    from(header, numColumns, numRows, null)
+  }
+
+  /**
+   * Build a `ColumnarBatch` consisting of a single [[SerializedTableColumn]] describing
+   * the specified serialized table.
+   *
+   * @param header header data for the serialized table
+   * @param numColumns number of columns in the table
+   * @param numRows number of rows in the table
+   * @param data the table data
    * @return columnar batch to be passed to [[GpuShuffleCoalesceExec]]
    */
   def from(
-      header: SerializedTableHeader,
-      hostBuffer: HostMemoryBuffer = null): ColumnarBatch = {
-    val column = new SerializedTableColumn(header, hostBuffer)
-    new ColumnarBatch(Array(column), header.getNumRows)
+      header: HostMemoryBuffer,
+      numColumns: Int,
+      numRows: Int,
+      data: HostMemoryBuffer = null): ColumnarBatch = {
+    val column = new SerializedTableColumn(header, numColumns, numRows, data)
+    new ColumnarBatch(Array(column), numRows)
   }
 
   def getMemoryUsed(batch: ColumnarBatch): Long = {
