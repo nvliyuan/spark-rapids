@@ -16,6 +16,9 @@
  */
 package org.apache.spark.sql.execution.datasources.parquet.rapids;
 
+import java.io.IOException;
+
+import org.apache.parquet.bytes.ByteBufferInputStream;
 import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.io.api.Binary;
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
@@ -25,6 +28,11 @@ import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
  * of methods that are not supported by concrete implementations
  */
 public class VectorizedReaderBase extends ValuesReader implements VectorizedValuesReader {
+
+	@Override
+	public void initFromPage(int valueCount, ByteBufferInputStream in) throws IOException {
+		throw new UnsupportedOperationException();
+	}
 
 	@Override
 	public void skip() {

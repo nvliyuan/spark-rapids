@@ -595,12 +595,10 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		} else if (type instanceof ShortType) {
 			data = transferBuffer(newCap * 2L, data, keepData);
 		} else if (type instanceof IntegerType || type instanceof FloatType ||
-				type instanceof DateType || DecimalType.is32BitDecimalType(type) ||
-				type instanceof YearMonthIntervalType) {
+				type instanceof DateType || DecimalType.is32BitDecimalType(type)) {
 			data = transferBuffer(newCap * 4L, data, keepData);
 		} else if (type instanceof LongType || type instanceof DoubleType ||
-				DecimalType.is64BitDecimalType(type) || type instanceof TimestampType ||
-				type instanceof TimestampNTZType || type instanceof DayTimeIntervalType) {
+				DecimalType.is64BitDecimalType(type) || type instanceof TimestampType) {
 			data = transferBuffer(newCap * 8L, data, keepData);
 		} else if (childColumns != null) {
 			// Nothing to store.

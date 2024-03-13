@@ -26,7 +26,6 @@ import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.Decompressor;
 import org.apache.parquet.bytes.BytesInput;
 import org.apache.parquet.hadoop.CodecFactory;
-import org.apache.parquet.hadoop.codec.ZstandardCodec;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 
 /**
@@ -67,7 +66,7 @@ public class ParquetHeapCodecFactory extends CodecFactory {
 				}
 				InputStream is = codec.createInputStream(bytes.toInputStream(), decompressor);
 
-				if (codec instanceof ZstandardCodec) {
+				/*if (codec instanceof ZstandardCodec) {*/
 					// We need to explicitly close the ZstdDecompressorStream here to release the resources
 					// it holds to avoid off-heap memory fragmentation issue, see PARQUET-2160.
 					// This change will load the decompressor stream into heap a little earlier, since the
@@ -75,9 +74,9 @@ public class ParquetHeapCodecFactory extends CodecFactory {
 					// for ZSTD streams.
 					decompressed = BytesInput.copy(BytesInput.from(is, uncompressedSize));
 					is.close();
-				} else {
+				/*} else {
 					decompressed = BytesInput.from(is, uncompressedSize);
-				}
+				}*/
 			} else {
 				decompressed = bytes;
 			}

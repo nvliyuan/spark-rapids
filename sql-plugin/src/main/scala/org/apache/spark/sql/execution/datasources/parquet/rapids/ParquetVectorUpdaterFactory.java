@@ -19,10 +19,7 @@ package org.apache.spark.sql.execution.datasources.parquet.rapids;
 import org.apache.parquet.column.ColumnDescriptor;
 import org.apache.parquet.column.Dictionary;
 import org.apache.parquet.io.api.Binary;
-import org.apache.parquet.schema.LogicalTypeAnnotation;
-import org.apache.parquet.schema.LogicalTypeAnnotation.IntLogicalTypeAnnotation;
-import org.apache.parquet.schema.LogicalTypeAnnotation.DecimalLogicalTypeAnnotation;
-import org.apache.parquet.schema.LogicalTypeAnnotation.TimestampLogicalTypeAnnotation;
+import org.apache.parquet.schema.OriginalType;
 import org.apache.parquet.schema.PrimitiveType;
 
 import org.apache.spark.sql.catalyst.util.DateTimeUtils;
@@ -38,11 +35,12 @@ import java.math.BigInteger;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
+import java.util.TimeZone;
 
 public class ParquetVectorUpdaterFactory {
 	private static final ZoneId UTC = ZoneOffset.UTC;
 
-	private final LogicalTypeAnnotation logicalTypeAnnotation;
+	private final OriginalType originalType;
 	// The timezone conversion to apply to int96 timestamps. Null if no conversion.
 	private final ZoneId convertTz;
 	private final String datetimeRebaseMode;
@@ -51,13 +49,13 @@ public class ParquetVectorUpdaterFactory {
 	private final String int96RebaseTz;
 
 	ParquetVectorUpdaterFactory(
-			LogicalTypeAnnotation logicalTypeAnnotation,
+			OriginalType originalType,
 			ZoneId convertTz,
 			String datetimeRebaseMode,
 			String datetimeRebaseTz,
 			String int96RebaseMode,
 			String int96RebaseTz) {
-		this.logicalTypeAnnotation = logicalTypeAnnotation;
+		this.originalType = originalType;
 		this.convertTz = convertTz;
 		this.datetimeRebaseMode = datetimeRebaseMode;
 		this.datetimeRebaseTz = datetimeRebaseTz;
@@ -93,8 +91,6 @@ public class ParquetVectorUpdaterFactory {
 						boolean failIfRebase = "EXCEPTION".equals(datetimeRebaseMode);
 						return new IntegerWithRebaseUpdater(failIfRebase);
 					}
-				} else if (sparkType instanceof YearMonthIntervalType) {
-					return new IntegerUpdater();
 				}
 				break;
 			case INT64:
@@ -111,7 +107,7 @@ public class ParquetVectorUpdaterFactory {
 					// fallbacks. We read them as decimal values.
 					return new UnsignedLongUpdater();
 				} else if (sparkType == DataTypes.TimestampType &&
-						isTimestampTypeMatched(LogicalTypeAnnotation.TimeUnit.MICROS)) {
+						isTimestampTypeMatched(OriginalType.TIME_MICROS)) {
 					if ("CORRECTED".equals(datetimeRebaseMode)) {
 						return new LongUpdater();
 					} else {
@@ -119,7 +115,7 @@ public class ParquetVectorUpdaterFactory {
 						return new LongWithRebaseUpdater(failIfRebase, datetimeRebaseTz);
 					}
 				} else if (sparkType == DataTypes.TimestampType &&
-						isTimestampTypeMatched(LogicalTypeAnnotation.TimeUnit.MILLIS)) {
+						isTimestampTypeMatched(OriginalType.TIME_MICROS)) {
 					if ("CORRECTED".equals(datetimeRebaseMode)) {
 						return new LongAsMicrosUpdater();
 					} else {
@@ -136,9 +132,7 @@ public class ParquetVectorUpdaterFactory {
 					validateTimestampNTZType();
 					// TIMESTAMP_NTZ is a new data type and has no legacy files that need to do rebase.
 					return new LongAsMicrosUpdater();
-				}*/ else if (sparkType instanceof DayTimeIntervalType) {
-					return new LongUpdater();
-				}
+				}*/
 				break;
 			case FLOAT:
 				if (sparkType == DataTypes.FloatType) {
@@ -202,9 +196,8 @@ public class ParquetVectorUpdaterFactory {
 		throw constructConvertNotSupportedException(descriptor, sparkType);
 	}
 
-	boolean isTimestampTypeMatched(LogicalTypeAnnotation.TimeUnit unit) {
-		return logicalTypeAnnotation instanceof TimestampLogicalTypeAnnotation &&
-				((TimestampLogicalTypeAnnotation) logicalTypeAnnotation).getUnit() == unit;
+	boolean isTimestampTypeMatched(OriginalType timeUnit) {
+		return originalType == timeUnit;
 	}
 
 /*
@@ -224,9 +217,18 @@ public class ParquetVectorUpdaterFactory {
 */
 
 	boolean isUnsignedIntTypeMatched(int bitWidth) {
-		return logicalTypeAnnotation instanceof IntLogicalTypeAnnotation &&
-				!((IntLogicalTypeAnnotation) logicalTypeAnnotation).isSigned() &&
-				((IntLogicalTypeAnnotation) logicalTypeAnnotation).getBitWidth() == bitWidth;
+		switch (originalType) {
+			case UINT_8:
+				return bitWidth == 8;
+			case UINT_16:
+				return bitWidth == 16;
+			case UINT_32:
+				return bitWidth == 32;
+			case UINT_64:
+				return bitWidth == 64;
+			default:
+				return false;
+		}
 	}
 
 	private static class BooleanUpdater extends ParquetVectorUpdater {
@@ -1145,7 +1147,7 @@ public class ParquetVectorUpdaterFactory {
 				return julianMicros;
 			}
 		} else {
-			return RebaseDateTime.rebaseJulianToGregorianMicros(timeZone, julianMicros);
+			return RebaseDateTime.rebaseJulianToGregorianMicros(julianMicros);
 		}
 	}
 
@@ -1204,12 +1206,13 @@ public class ParquetVectorUpdaterFactory {
 
 	private static boolean isDecimalTypeMatched(ColumnDescriptor descriptor, DataType dt) {
 		DecimalType d = (DecimalType) dt;
-		LogicalTypeAnnotation typeAnnotation = descriptor.getPrimitiveType().getLogicalTypeAnnotation();
-		if (typeAnnotation instanceof DecimalLogicalTypeAnnotation) {
-			DecimalLogicalTypeAnnotation decimalType = (DecimalLogicalTypeAnnotation) typeAnnotation;
+		PrimitiveType pt = descriptor.getPrimitiveType();
+		if (pt.getOriginalType() == OriginalType.DECIMAL) {
+			int precision = pt.getDecimalMetadata().getPrecision();
+			int scale = pt.getDecimalMetadata().getScale();
 			// It's OK if the required decimal precision is larger than or equal to the physical decimal
 			// precision in the Parquet metadata, as long as the decimal scale is the same.
-			return decimalType.getPrecision() <= d.precision() && decimalType.getScale() == d.scale();
+			return precision <= d.precision() && scale == d.scale();
 		}
 		return false;
 	}
