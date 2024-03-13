@@ -16,12 +16,11 @@
 
 package com.nvidia.spark.rapids
 
-import java.util
+import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{HostMemoryBuffer, JCudfSerialization, NvtxColor, NvtxRange}
-import ai.rapids.cudf.JCudfSerialization.{HostConcatResult, SerializedTableHeader}
+import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
-import com.nvidia.spark.rapids.ScalableTaskCompletion.onTaskCompletion
+import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.TaskContext
@@ -68,9 +67,7 @@ case class GpuShuffleCoalesceExec(child: SparkPlan, targetBatchByteSize: Long)
     val dataTypes = GpuColumnVector.extractTypes(schema)
 
     child.executeColumnar().mapPartitions { iter =>
-      new GpuShuffleCoalesceIterator(
-        new HostShuffleCoalesceIterator(iter, targetSize, metricsMap),
-        dataTypes, metricsMap)
+      new GpuShuffleCoalesceIterator(iter, dataTypes, targetSize, metricsMap)
     }
   }
 }
@@ -78,86 +75,42 @@ case class GpuShuffleCoalesceExec(child: SparkPlan, targetBatchByteSize: Long)
 /**
  * Iterator that coalesces columnar batches that are expected to only contain
  * [[SerializedTableColumn]]. The serialized tables within are collected up
- * to the target batch size and then concatenated on the host before handing
- * them to the caller on `.next()`
+ * to the target batch size and then concatenated before the data is transferred to the GPU.
  */
-class HostShuffleCoalesceIterator(
+class GpuShuffleCoalesceIterator(
     iter: Iterator[ColumnarBatch],
+    dataTypes: Array[DataType],
     targetBatchByteSize: Long,
-    metricsMap: Map[String, GpuMetric])
-      extends Iterator[HostConcatResult] with AutoCloseable {
-  private[this] val concatTimeMetric = metricsMap(GpuMetric.CONCAT_TIME)
-  private[this] val inputBatchesMetric = metricsMap(GpuMetric.NUM_INPUT_BATCHES)
-  private[this] val inputRowsMetric = metricsMap(GpuMetric.NUM_INPUT_ROWS)
-  private[this] val serializedTables = new util.ArrayDeque[SerializedTableColumn]
+    metricsMap: Map[String, GpuMetric]) extends GpuColumnarBatchIterator(true) {
+  private[this] val serializedTables = new ArrayBuffer[SerializedTableColumn]
   private[this] var numTablesInBatch: Int = 0
   private[this] var numRowsInBatch: Int = 0
   private[this] var batchByteSize: Long = 0L
+  private[this] val opTime = metricsMap(GpuMetric.OP_TIME)
+  private[this] val outputBatches = metricsMap(GpuMetric.NUM_OUTPUT_BATCHES)
+  private[this] val outputRows = metricsMap(GpuMetric.NUM_OUTPUT_ROWS)
 
-  // Don't install the callback if in a unit test
-  Option(TaskContext.get()).foreach { tc =>
-    onTaskCompletion(tc) {
-      close()
-    }
+  override def doClose(): Unit = {
+    serializedTables.safeClose()
   }
 
-  override def close(): Unit = {
-    serializedTables.forEach(_.close())
-    serializedTables.clear()
-  }
-
-  def concatenateTablesInHost(): HostConcatResult = {
-    val result = withResource(new MetricRange(concatTimeMetric)) { _ =>
-      val firstTable = serializedTables.peekFirst().header
-      if (firstHeader.getNumColumns == 0) {
-        (0 until numTablesInBatch).foreach(_ => serializedTables.removeFirst())
-        cudf_utils.HostConcatResultUtil.rowsOnlyHostConcatResult(numRowsInBatch)
-      } else {
-        val headers = new Array[SerializedTableHeader](numTablesInBatch)
-        withResource(new Array[HostMemoryBuffer](numTablesInBatch)) { buffers =>
-          headers.indices.foreach { i =>
-            val serializedTable = serializedTables.removeFirst()
-            headers(i) = serializedTable.header
-            buffers(i) = serializedTable.hostBuffer
-          }
-          JCudfSerialization.concatToHostBuffer(headers, buffers)
-        }
-      }
-    }
-
-    // update the stats for the next batch in progress
-    numTablesInBatch = serializedTables.size
-
-    batchByteSize = 0
-    numRowsInBatch = 0
-    if (numTablesInBatch > 0) {
-      require(numTablesInBatch == 1,
-        "should only track at most one buffer that is not in a batch")
-      val header = serializedTables.peekFirst().header
-      batchByteSize = header.getDataLen
-      numRowsInBatch = header.getNumRows
-    }
-
-    result
-  }
-
-  private def bufferNextBatch(): Unit = {
-    if (numTablesInBatch == serializedTables.size()) {
+  override def hasNext: Boolean = {
+    if (numTablesInBatch == serializedTables.size) {
       var batchCanGrow = batchByteSize < targetBatchByteSize
       while (batchCanGrow && iter.hasNext) {
         closeOnExcept(iter.next()) { batch =>
-          inputBatchesMetric += 1
           // don't bother tracking empty tables
           if (batch.numRows > 0) {
-            inputRowsMetric += batch.numRows()
-            val tableColumn = batch.column(0).asInstanceOf[SerializedTableColumn]
-            batchCanGrow = canAddToBatch(tableColumn)
-            serializedTables.addLast(tableColumn)
+            val nextTable = batch.column(0).asInstanceOf[SerializedTableColumn]
+            serializedTables.append(nextTable)
+            val nextTableSize = nextTable.hostBuffer.getLength
+            batchCanGrow = batchByteSize + nextTableSize <= targetBatchByteSize &&
+              numRowsInBatch.toLong + nextTable.numRows <= Integer.MAX_VALUE
             // always add the first table to the batch even if its beyond the target limits
             if (batchCanGrow || numTablesInBatch == 0) {
               numTablesInBatch += 1
-              numRowsInBatch += tableColumn.header.getNumRows
-              batchByteSize += tableColumn.header.getDataLen
+              numRowsInBatch += nextTable.numRows
+              batchByteSize += nextTableSize
             }
           } else {
             batch.close()
@@ -165,68 +118,57 @@ class HostShuffleCoalesceIterator(
         }
       }
     }
-  }
-
-  override def hasNext(): Boolean = {
-    bufferNextBatch()
     numTablesInBatch > 0
   }
-
-  override def next(): HostConcatResult = {
-    if (!hasNext()) {
-      throw new NoSuchElementException("No more host batches to concatenate")
-    }
-    concatenateTablesInHost()
-  }
-
-  private def canAddToBatch(nextTable: SerializedTableColumn): Boolean = {
-    batchByteSize + nextTable.hostBuffer.getLength <= targetBatchByteSize &&
-      numRowsInBatch.toLong + nextTable.numRows <= Integer.MAX_VALUE
-  }
-}
-
-/**
- * Iterator that coalesces columnar batches that are expected to only contain
- * [[SerializedTableColumn]]. The serialized tables within are collected up
- * to the target batch size and then concatenated on the host before the data
- * is transferred to the GPU.
- */
-class GpuShuffleCoalesceIterator(iter: Iterator[HostConcatResult],
-                                 dataTypes: Array[DataType],
-                                 metricsMap: Map[String, GpuMetric])
-      extends Iterator[ColumnarBatch] {
-  private[this] val opTimeMetric = metricsMap(GpuMetric.OP_TIME)
-  private[this] val outputBatchesMetric = metricsMap(GpuMetric.NUM_OUTPUT_BATCHES)
-  private[this] val outputRowsMetric = metricsMap(GpuMetric.NUM_OUTPUT_ROWS)
-
-  override def hasNext: Boolean = iter.hasNext
 
   override def next(): ColumnarBatch = {
     if (!hasNext) {
       throw new NoSuchElementException("No more columnar batches")
     }
-    withResource(new NvtxRange("Concat+Load Batch", NvtxColor.YELLOW)) { _ =>
-      val hostConcatResult = withResource(new MetricRange(opTimeMetric)) { _ =>
-        // op time covers concat time performed in `iter.next()`.
-        // Note the concat runs on CPU.
-        // GPU time = opTime - concatTime
-        iter.next()
-      }
-
-      withResource(hostConcatResult) { _ =>
-        // We acquire the GPU regardless of whether `hostConcatResult`
-        // is an empty batch or not, because the downstream tasks expect
-        // the `GpuShuffleCoalesceIterator` to acquire the semaphore and may
-        // generate GPU data from batches that are empty.
+    withResource(new NvtxRange("Concat Batch", NvtxColor.YELLOW)) { _ =>
+      val batchTables = serializedTables.take(numTablesInBatch)
+      if (batchTables.head.numColumns == 0) {
+        val batch = new ColumnarBatch(Array.empty, numRowsInBatch)
+        // We acquire the GPU even on an empty batch, because the downstream tasks expect this
+        // iterator to acquire the semaphore and may generate GPU data from batches that are empty.
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
-
-        withResource(new MetricRange(opTimeMetric)) { _ =>
-          val batch = cudf_utils.HostConcatResultUtil.getColumnarBatch(hostConcatResult, dataTypes)
-          outputBatchesMetric += 1
-          outputRowsMetric += batch.numRows()
-          batch
+        batch
+      } else {
+        val startTime = System.nanoTime()
+        val sortedTables= batchTables.sortBy(_.hostBuffer.getAddress)
+        val headerAddrs = sortedTables.map(_.header.getAddress).toArray
+        val dataRanges = computeDataRanges(sortedTables)
+        opTime += System.nanoTime() - startTime
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+        opTime.ns {
+          val table = ConcatUtil.concatSerializedTables(headerAddrs, dataRanges)
+          outputBatches += 1
+          outputRows += numRowsInBatch
+          numTablesInBatch = 0
+          numRowsInBatch = 0
+          batchByteSize = 0
+          serializedTables.remove(0, numTablesInBatch)
+          batchTables.safeClose()
+          GpuColumnVector.from(table, dataTypes)
         }
       }
     }
+  }
+
+  private def computeDataRanges(tables: ArrayBuffer[SerializedTableColumn]): Array[Long] = {
+    val ranges = new ArrayBuffer[Long]
+    tables.foreach { table =>
+      val tableAddress = table.hostBuffer.getAddress
+      val tableSize = table.hostBuffer.getLength
+      if (ranges.nonEmpty && ranges.last == tableAddress) {
+        ranges.update(ranges.size - 1, tableAddress + tableSize)
+        ranges.append(table.hostBuffer.getAddress)
+        ranges.append(table.hostBuffer.getLength)
+      } else {
+        ranges.append(tableAddress)
+        ranges.append(tableAddress + tableSize)
+      }
+    }
+    ranges.toArray
   }
 }
