@@ -1563,6 +1563,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(true)
 
+  val SERIALIZER_DATA_BATCH_SIZE = conf("spark.rapids.serializer.batchSize")
+    .doc("Size in bytes of memory buffers to use to collect data for small batches before " +
+      "copying to the GPU to reduce copy overhead. A batch larger than this size will use " +
+      "a dedicated buffer.")
+    .internal()
+    .bytesConf(ByteUnit.BYTE)
+    .createWithDefault("8M")
+
   val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
     .doc("Enable or disable the RAPIDS Shuffle Manager at runtime. " +
       "The [RAPIDS Shuffle Manager](https://docs.nvidia.com/spark-rapids/user-guide/latest" +
@@ -2737,6 +2745,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shouldHiveReadDoubles: Boolean = get(ENABLE_READ_HIVE_DOUBLES)
 
   lazy val shouldHiveReadDecimals: Boolean = get(ENABLE_READ_HIVE_DECIMALS)
+
+  lazy val serializerDataBatchSize: Long = get(SERIALIZER_DATA_BATCH_SIZE)
 
   lazy val shuffleManagerEnabled: Boolean = get(SHUFFLE_MANAGER_ENABLED)
 
