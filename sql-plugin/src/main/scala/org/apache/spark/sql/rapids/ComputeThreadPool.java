@@ -85,21 +85,21 @@ public class ComputeThreadPool {
 
 		workers = new Worker[threadNum];
 		for (int i = 0; i < threadNum; ++i) {
-			workers[i] = new Worker();
+			workers[i] = new Worker(threadGroup, workerSemaphore);
 			workers[i].start();
 		}
 	}
 
 	private class Worker extends Thread {
 
-		Worker() {
+		Worker(ThreadGroup threadGroup, Semaphore semaphore) {
 			super(threadGroup, () -> {
 				while (true) {
 					try {
 						TaskWithPriority<?> task = taskQueue.take();
 						task.status = TaskStatus.RUNNING;
 						if (!task.semaphoreAcquired) {
-							workerSemaphore.acquire();
+							semaphore.acquire();
 						}
 						try {
 							task.run();
@@ -116,7 +116,7 @@ public class ComputeThreadPool {
 					} catch (InterruptedException e) {
 						throw new RuntimeException(e);
 					} finally {
-						workerSemaphore.release();
+						semaphore.release();
 					}
 				}
 			});

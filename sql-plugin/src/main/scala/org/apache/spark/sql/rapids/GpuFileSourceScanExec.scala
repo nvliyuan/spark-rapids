@@ -445,7 +445,11 @@ case class GpuFileSourceScanExec(
         )
       case _: GpuReadParquetFileFormat | _: GpuOrcFileFormat =>
         Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
-          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME))
+          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME),
+          "filteredRowGroups" -> createMetric(DEBUG_LEVEL, "filtered row groups"),
+          "totalRowGroups" -> createMetric(DEBUG_LEVEL, "total row groups"),
+          "decodeGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL, "GPU wait time for Decode"),
+        )
       case _ =>
         Map.empty[String, GpuMetric]
     }
