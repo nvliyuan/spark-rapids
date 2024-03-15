@@ -193,7 +193,7 @@ class GpuHiveParquetFileFormat(compType: CompressionType) extends ColumnarFileFo
 
 class GpuHiveParquetWriter(override val path: String, dataSchema: StructType,
     context: TaskAttemptContext, compType: CompressionType)
-  extends ColumnarOutputWriter(context, dataSchema, "HiveParquet", false) {
+  extends ColumnarOutputWriter(context, dataSchema, "HiveParquet", true) {
 
   override protected val tableWriter: CudfTableWriter = {
     // TODO How to set FieldIDEnabled ?
