@@ -17,7 +17,7 @@
 package org.apache.spark.sql.execution.datasources.parquet.rapids
 
 import java.util.TimeZone
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.{LinkedBlockingQueue, Semaphore, TimeUnit}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
 import java.util.concurrent.locks.ReentrantLock
 
@@ -25,9 +25,10 @@ import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer, NvtxColor, Table}
-import com.nvidia.spark.rapids.{DateTimeRebaseMode, GpuDataProducer, GpuMetric, GpuSemaphore, HMBInputFile, NvtxWithMetrics}
-import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
+import com.nvidia.spark.rapids.{DateTimeRebaseMode, GpuColumnVector, GpuMetric, GpuSemaphore, HMBInputFile, NvtxWithMetrics}
+import com.nvidia.spark.rapids.Arm.withResource
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{AutoCloseableAttemptSpliterator, RmmRapidsRetryAutoCloseableIterator}
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.{HadoopReadOptions, VersionParser}
 import org.apache.parquet.VersionParser.ParsedVersion
@@ -40,14 +41,21 @@ import org.json4s.jackson.JsonMethods._
 
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
-import org.apache.spark.sql.execution.datasources.parquet.rapids.HybridTableProducer.preloadMemPool
 import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector
 import org.apache.spark.sql.rapids.ComputeThreadPool
 import org.apache.spark.sql.rapids.ComputeThreadPool.TaskWithPriority
 import org.apache.spark.sql.types.{ArrayType, BinaryType, DataType, DecimalType, MapType, StructType}
+import org.apache.spark.sql.vectorized.ColumnarBatch
 
 
-case class AsyncBatchResult(data: Array[HostColumnVector], sizeInByte: Long)
+case class AsyncBatchResult(data: Array[HostColumnVector],
+                            sizeInByte: Long) extends AutoCloseable {
+  override def close(): Unit = {
+    data.safeClose()
+  }
+}
+
+class AsyncParquetReaderError(ex: Throwable) extends RuntimeException(ex)
 
 class AsyncParquetReader(
     conf: Configuration,
@@ -58,15 +66,24 @@ class AsyncParquetReader(
     metrics: Map[String, GpuMetric],
     dateRebaseMode: DateTimeRebaseMode,
     timestampRebaseMode: DateTimeRebaseMode,
-    clippedSchema: MessageType)
+    clippedSchema: MessageType,
+    slotAcquired: Boolean,
+    asynchronous: Boolean = true)
   extends Iterator[AsyncBatchResult] with AutoCloseable with Logging {
+
+  private type Element = Either[AsyncBatchResult, Throwable]
 
   private val initialized = new AtomicBoolean(false)
   @volatile private var cancelled = false
   private val taskID = TaskContext.get().taskAttemptId()
-  private val runningLock = new ReentrantLock()
 
-  private lazy val resultQueue = new LinkedBlockingQueue[AsyncBatchResult]()
+  private val runningLock = if (asynchronous) {
+    Some(new ReentrantLock())
+  } else {
+    None
+  }
+
+  private lazy val resultQueue = new LinkedBlockingQueue[Element]()
 
   private var task: TaskWithPriority[Unit] = _
 
@@ -232,22 +249,42 @@ class AsyncParquetReader(
 
     var numProduced = producedBatches.get()
     while (numProduced < numBatches && !cancelled) {
-      val batchResult = try {
-        runningLock.lock()
-        if (cancelled) None else Option(readImpl())
+      val batchResult: Element = try {
+        runningLock.get.lock()
+        if (cancelled) {
+          Right(new RuntimeException("AsyncReadTask has been cancelled"))
+        } else {
+          Left(readImpl())
+        }
+      } catch {
+        case ex: Throwable =>
+          Right(ex)
       } finally {
-        runningLock.unlock()
+        runningLock.get.unlock()
       }
-      batchResult.foreach { ret =>
-        resultQueue.offer(ret)
-        numProduced = producedBatches.incrementAndGet()
-        logDebug(s"[$taskID] produced a new batch($numProduced/$numBatches)")
+
+      if (!cancelled) {
+        resultQueue.offer(batchResult)
+        batchResult match {
+          case Left(_) =>
+            numProduced = producedBatches.incrementAndGet()
+            logError(s"[$taskID] produced a new batch($numProduced/$numBatches)")
+          case Right(exception) =>
+            throw exception
+        }
       }
     }
   }
 
-  private def launchTask(): Unit = if (task == null) {
-    task = new TaskWithPriority(() => readAsProducer(), 0, true)
+  private def launchTask(): Unit = if (asynchronous && task == null) {
+    //    val failedCallback = new FailedCallback {
+    //      private val queue = resultQueue
+    //      override def callback(ex: Throwable): Unit = {
+    //        queue.offer(Right(ex))
+    //      }
+    //    }
+    task = new TaskWithPriority(() => readAsProducer(),
+      0, slotAcquired, null, null)
     ComputeThreadPool.submitTask(task)
   }
 
@@ -257,10 +294,23 @@ class AsyncParquetReader(
   }
 
   override def next(): AsyncBatchResult = {
-    val ret = resultQueue.take()
-    val numConsumed = consumedBatches.incrementAndGet()
-    logDebug(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
-    ret
+    withResource(new NvtxWithMetrics("waitAsyncCpuDecode", NvtxColor.YELLOW,
+      metrics("waitAsyncDecode"))) { _ =>
+
+      val batchResult = if (asynchronous) {
+        resultQueue.take()
+      } else {
+        Left(readImpl())
+      }
+      batchResult match {
+        case Left(columnBatch) =>
+          val numConsumed = consumedBatches.incrementAndGet()
+          logError(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
+          columnBatch
+        case Right(ex) =>
+          throw new AsyncParquetReaderError(ex)
+      }
+    }
   }
 
   override def close(): Unit = {
@@ -273,10 +323,13 @@ class AsyncParquetReader(
       cancelled = true
     }
 
-    runningLock.lock()
+    runningLock.foreach(_.lock())
     // release all prefetched batches
-    while (!resultQueue.isEmpty) {
-      resultQueue.take().data.foreach(_.close())
+    while (asynchronous && !resultQueue.isEmpty) {
+      resultQueue.take() match {
+        case Left(data) => data.safeClose()
+        case Right(_) =>
+      }
     }
     // release all work buffers since all work are done
     if (initialized.get()) {
@@ -288,7 +341,12 @@ class AsyncParquetReader(
     if (fileBuffer.getRefCount > 0) {
       fileBuffer.close()
     }
-    runningLock.unlock()
+    runningLock.foreach(_.unlock())
+
+    // release the slot for synchronous mode
+    if (!asynchronous) {
+      HostParquetIterator.releaseSlot(false)
+    }
   }
 
 }
@@ -304,102 +362,126 @@ object AsyncParquetReader {
             timestampRebaseMode: DateTimeRebaseMode,
             hasInt96Timestamps: Boolean,
             clippedSchema: MessageType,
-            readDataSchema: StructType): AsyncParquetReader = {
+            readDataSchema: StructType,
+            slotAcquired: Boolean,
+            asynchronous: Boolean): AsyncParquetReader = {
     new AsyncParquetReader(conf,
       tgtBatchSize, fileBuffer, offset, len,
       metrics,
       dateRebaseMode, timestampRebaseMode,
-      clippedSchema)
+      clippedSchema,
+      slotAcquired, asynchronous)
   }
 }
 
-class HybridTableProducer(
-    asyncHostReader: AsyncParquetReader,
-    hybridOpts: HybridParquetOpts,
-    metrics: Map[String, GpuMetric]) extends GpuDataProducer[Table] with Logging {
+class HostParquetIterator(
+    asyncIter: HostParquetIterator.HostParquetSpliterator) extends
+  RmmRapidsRetryAutoCloseableIterator[AsyncBatchResult, ColumnarBatch](asyncIter) {
 
-  private val enablePreload = hybridOpts.maxDevicePreloadBytes > 0
-  private var preloadedMemSize: Long = 0
-  private var holdGPUSemaphore = false
+  private var isClosed = false
 
   override def hasNext: Boolean = {
-    asyncHostReader.hasNext
+    val hasNext = !isClosed && super.hasNext
+    if (!hasNext && !isClosed) {
+      asyncIter.close()
+      isClosed = true
+    }
+    hasNext
+  }
+}
+
+object HostParquetIterator extends Logging {
+
+  def apply(asyncReader: AsyncParquetReader,
+            hybridOpts: HybridParquetOpts,
+            dataTypes: Array[DataType],
+            metrics: Map[String, GpuMetric]): HostParquetIterator = {
+    val h2dTransfer = new HostToDeviceTransfer(dataTypes, hybridOpts, metrics)
+    val spliterator = new HostParquetSpliterator(asyncReader, h2dTransfer)
+    new HostParquetIterator(spliterator)
   }
 
-  override def next: Table = {
-    val asyncRet = withResource(new NvtxWithMetrics("waitAsyncCpuDecode", NvtxColor.YELLOW,
-      metrics("waitAsyncDecode"))) { _ =>
-      asyncHostReader.next()
-    }
+  private class HostParquetSpliterator(
+      asyncReader: AsyncParquetReader,
+      transfer: HostToDeviceTransfer) extends
+    AutoCloseableAttemptSpliterator[AsyncBatchResult, ColumnarBatch](
+      asyncReader, transfer.execute) {
 
-    if (!holdGPUSemaphore) {
-      if (enablePreload && tryAcquirePreloadH2DSlots(asyncRet.sizeInByte)) {
-        preloadedMemSize += asyncRet.sizeInByte
-        metrics("preloadH2DBatches") += 1
-      } else {
+    override def close(): Unit = {
+      asyncReader.close()
+      transfer.close()
+      super.close()
+    }
+  }
+
+  private class HostToDeviceTransfer(
+      dataTypes: Array[DataType],
+      hybridOpts: HybridParquetOpts,
+      metrics: Map[String, GpuMetric]) extends AutoCloseable with Logging {
+
+    private val enablePreload = hybridOpts.maxPreloadBytes > 0
+
+    def execute(batchResult: AsyncBatchResult): ColumnarBatch = {
+      val batchMemSize = batchResult.sizeInByte
+
+      val preloaded = if (!enablePreload || !tryAcquirePreloadH2DSlots(batchMemSize)) {
         withResource(new NvtxWithMetrics(
           "GPU wait time before H2D", NvtxColor.WHITE, metrics("preH2dGpuWait"))) { _ =>
-          takeSemaphore()
+          GpuSemaphore.acquireIfNecessary(TaskContext.get())
         }
+        false
+      } else {
+        metrics("preloadH2DBatches") += 1
+        true
       }
-    }
 
-    withResource(new NvtxWithMetrics("Transfer HostVectors to Device", NvtxColor.CYAN,
-      metrics("hostVecToDeviceTime"))) { _ =>
-      closeOnExcept(asyncRet.data) { hostCVs =>
+      val ret = withResource(new NvtxWithMetrics("Transfer HostVectors to Device", NvtxColor.CYAN,
+        metrics("hostVecToDeviceTime"))) { _ =>
 
-        val batchRows = hostCVs.head.getRowCount
-        logInfo(s"VectorizedParquetGpuProducer batches $batchRows rows; ")
+        // Do NOT close hostColumnVectors here in case of retry (it will be closed via
+        // AsyncBatchResult::close)
+        val deviceCVs = batchResult.data.safeMap(_.copyToDevice())
+
+        val batchRows = batchResult.data.head.getRowCount
         metrics.get("cpuDecodeRows").foreach(_.+=(batchRows))
         metrics.get("cpuDecodeBatches").foreach(_.+=(1))
         metrics.get("numOutputBatches").foreach(_.+=(1))
 
-        val deviceCVs = hostCVs.safeMap { hcv =>
-          val dcv = hcv.copyToDevice()
-          hcv.close()
-          dcv
+        withResource(deviceCVs) { dCVs =>
+          withResource(new Table(dCVs: _*)) { table =>
+            GpuColumnVector.from(table, dataTypes)
+          }
         }
-        withResource(deviceCVs) { dCVs => new Table(dCVs: _*) }
+      }
+
+      if (preloaded) {
+        withResource(new NvtxWithMetrics(
+          "GPU wait time after H2D", NvtxColor.WHITE, metrics("postH2dGpuWait"))) { _ =>
+          GpuSemaphore.acquireIfNecessary(TaskContext.get())
+          preloadMemPool.getAndAdd(batchMemSize)
+        }
+      }
+
+      ret
+    }
+
+    private def tryAcquirePreloadH2DSlots(batchMemSize: Long): Boolean = {
+      if (preloadMemPool.addAndGet(-batchMemSize) < 0) {
+        preloadMemPool.getAndAdd(batchMemSize)
+        false
+      } else {
+        true
       }
     }
+
+    override def close(): Unit = {}
   }
 
-  private def tryAcquirePreloadH2DSlots(batchMemSize: Long): Boolean = {
-    if (preloadMemPool.addAndGet(-batchMemSize) < 0) {
-      preloadMemPool.getAndAdd(batchMemSize)
-      false
-    } else {
-      true
-    }
-  }
-
-  private def takeSemaphore(): Unit = {
-    GpuSemaphore.acquireIfNecessary(TaskContext.get())
-    holdGPUSemaphore = true
-    if (enablePreload) {
-      preloadMemPool.getAndAdd(preloadedMemSize)
-      preloadedMemSize = 0
-    }
-  }
-
-  override def close(): Unit = {
-    asyncHostReader.close()
-    if (!holdGPUSemaphore) {
-      withResource(new NvtxWithMetrics(
-        "GPU wait time after H2D", NvtxColor.WHITE, metrics("postH2dGpuWait"))) { _ =>
-        takeSemaphore()
-      }
-    }
-  }
-
-}
-
-object HybridTableProducer {
   def parseHybridParquetOpts(str: String): HybridParquetOpts = {
     implicit val formats: Formats = DefaultFormats
     val defaultJson = parse(
-      """{"mode": "GPU_ONLY", "maxHostThreads": 0, "batchSizeBytes": 0,
-        |"pollInterval": 0, "maxDevicePreloadBytes": 0}""".stripMargin)
+      """{"mode": "GPU_ONLY", "maxConcurrent": 0, "batchSizeBytes": 0, "async": true,
+        |"pollInterval": 0, "maxPreloadBytes": 0}""".stripMargin)
 
     val json: JValue = if (str.isEmpty) {
       defaultJson
@@ -425,19 +507,34 @@ object HybridTableProducer {
     }.getOrElse(true)
   }
 
+  def tryAcquireSlot(opts: HybridParquetOpts): Boolean = {
+    if (opts.async) {
+      ComputeThreadPool.bookIdleWorker(opts.pollInterval)
+    } else {
+      syncSemaphore.tryAcquire(1, opts.pollInterval, TimeUnit.MILLISECONDS)
+    }
+  }
+
+  def releaseSlot(async: Boolean): Unit = if (async) {
+    ComputeThreadPool.releaseWorker()
+  } else {
+    syncSemaphore.release()
+  }
+
   def initialize(opts: HybridParquetOpts): Unit = {
     if (!initialized.get()) synchronized {
       if (!initialized.get()) {
-        ComputeThreadPool.launch(opts.maxHostThreads, 1024)
-        preloadMemPool = new AtomicLong(opts.maxDevicePreloadBytes)
+        syncSemaphore = new Semaphore(opts.maxConcurrent)
+        ComputeThreadPool.launch(opts.maxConcurrent, 1024)
+        preloadMemPool = new AtomicLong(opts.maxPreloadBytes)
         initialized.set(true)
       }
     }
   }
 
   private var preloadMemPool: AtomicLong = _
+  private var syncSemaphore: Semaphore = _
   private val initialized: AtomicBoolean = new AtomicBoolean(false)
-
 }
 
 // sealed trait ReadMode
@@ -446,7 +543,8 @@ object HybridTableProducer {
 // object DeviceFirst extends ReadMode
 
 case class HybridParquetOpts(mode: String,
-                             maxHostThreads: Int,
+                             maxConcurrent: Int,
                              batchSizeBytes: Long,
                              pollInterval: Int,
-                             maxDevicePreloadBytes: Long)
+                             maxPreloadBytes: Long,
+                             async: Boolean)

@@ -28,22 +28,47 @@ public class ComputeThreadPool {
 		FAILED
 	}
 
+	public interface FailedCallback {
+		void callback(Throwable ex);
+	}
+
+	public interface SuccessfulCallback<Result> {
+		void callback(Result result);
+	}
+
+
 	public static class TaskWithPriority<Result> {
 
 		public TaskWithPriority(Callable<Result> task, int priority, boolean semaphoreAcquired) {
+			this(task, priority, semaphoreAcquired, null, null);
+		}
+
+		public TaskWithPriority(Callable<Result> task,
+														int priority,
+														boolean semaphoreAcquired,
+														SuccessfulCallback<Result> succeedCb,
+														FailedCallback failedCb) {
 			this.task = task;
 			this.priority = priority;
 			this.promise = new CompletableFuture<>();
 			this.status = TaskStatus.PENDING;
 			this.semaphoreAcquired = semaphoreAcquired;
+			this.succeedCb = succeedCb;
+			this.failedCb = failedCb;
 		}
 
 		private void run() throws Exception {
 			try {
 				Result ret = task.call();
 				promise.complete(ret);
-			} catch (Exception e) {
+				if (succeedCb != null) {
+					succeedCb.callback(ret);
+				}
+			} catch (Throwable e) {
 				promise.completeExceptionally(e);
+				if (failedCb != null) {
+					failedCb.callback(e);
+				}
 				throw e;
 			}
 		}
@@ -75,51 +100,64 @@ public class ComputeThreadPool {
 		private final int priority;
 		private volatile TaskStatus status;
 		private final boolean semaphoreAcquired;
+
+		private final SuccessfulCallback<Result> succeedCb;
+		private final FailedCallback failedCb;
 	}
 
 	private ComputeThreadPool(int threadNum, int taskQueueCapacity) {
 		this.taskQueue = new PriorityBlockingQueue<>(
 				taskQueueCapacity, Comparator.comparingInt(o -> o.priority));
-		this.threadGroup = new ThreadGroup("CPU_INTENSIVE_THREADS");
+		ThreadGroup threadGroup = new ThreadGroup("CPU_INTENSIVE_THREADS");
 		this.workerSemaphore = new Semaphore(threadNum);
 
 		workers = new Worker[threadNum];
 		for (int i = 0; i < threadNum; ++i) {
-			workers[i] = new Worker(threadGroup, workerSemaphore);
+			workers[i] = new Worker(threadGroup, workerSemaphore, taskQueue);
 			workers[i].start();
 		}
 	}
 
-	private class Worker extends Thread {
+	private static class Worker extends Thread {
 
-		Worker(ThreadGroup threadGroup, Semaphore semaphore) {
-			super(threadGroup, () -> {
-				while (true) {
-					try {
-						TaskWithPriority<?> task = taskQueue.take();
-						task.status = TaskStatus.RUNNING;
-						if (!task.semaphoreAcquired) {
-							semaphore.acquire();
-						}
+		Worker(ThreadGroup threadGroup, Semaphore semaphore, PriorityBlockingQueue<TaskWithPriority<?>> taskQueue) {
+			super(threadGroup, Worker.getRunner(semaphore, taskQueue));
+		}
+
+		private static Runnable getRunner(Semaphore semaphore, PriorityBlockingQueue<TaskWithPriority<?>> taskQueue) {
+			return new Runnable() {
+				private final Semaphore sph = semaphore;
+				private final PriorityBlockingQueue<TaskWithPriority<?>> queue = taskQueue;
+				@Override
+				public void run() {
+					System.err.println("background thread started...");
+					while (true) {
 						try {
-							task.run();
-						} catch (Exception ex) {
-							task.status = TaskStatus.FAILED;
-							StringBuilder stackTrace = new StringBuilder();
-							stackTrace.append(ex).append('\n');
-							for (StackTraceElement elem : ex.getStackTrace()) {
-								stackTrace.append(elem.toString()).append('\n');
+							TaskWithPriority<?> task = queue.take();
+							task.status = TaskStatus.RUNNING;
+							if (!task.semaphoreAcquired) {
+								sph.acquire();
 							}
-							System.err.println("ComputeThreadPool: background task failed: " + stackTrace);
+							try {
+								task.run();
+								task.status = TaskStatus.SUCCESSFUL;
+							} catch (Exception ex) {
+								task.status = TaskStatus.FAILED;
+								StringBuilder stackTrace = new StringBuilder();
+								stackTrace.append(ex).append('\n');
+								for (StackTraceElement elem : ex.getStackTrace()) {
+									stackTrace.append(elem.toString()).append('\n');
+								}
+								System.err.println("ComputeThreadPool: background task failed: " + stackTrace);
+							}
+						} catch (InterruptedException e) {
+							throw new RuntimeException(e);
+						} finally {
+							sph.release();
 						}
-						task.status = TaskStatus.SUCCESSFUL;
-					} catch (InterruptedException e) {
-						throw new RuntimeException(e);
-					} finally {
-						semaphore.release();
 					}
 				}
-			});
+			};
 		}
 	}
 
@@ -149,6 +187,11 @@ public class ComputeThreadPool {
 		}
 	}
 
+	public static int releaseWorker() {
+		INSTANCE.workerSemaphore.release();
+		return INSTANCE.workerSemaphore.availablePermits();
+	}
+
 	public static ComputeThreadPool getInstance() {
 		if (INSTANCE == null) {
 			throw new RuntimeException("CpuIntensiveThreadPool is NOT initialized");
@@ -167,7 +210,6 @@ public class ComputeThreadPool {
 
 	private final Semaphore workerSemaphore;
 	private final PriorityBlockingQueue<TaskWithPriority<?>> taskQueue;
-	private final ThreadGroup threadGroup;
 	private final Worker[] workers;
 
 }

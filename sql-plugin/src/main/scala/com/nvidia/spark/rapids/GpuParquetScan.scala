@@ -65,11 +65,10 @@ import org.apache.spark.sql.catalyst.util.CaseInsensitiveMap
 import org.apache.spark.sql.connector.read.{InputPartition, PartitionReader, PartitionReaderFactory}
 import org.apache.spark.sql.execution.QueryExecutionException
 import org.apache.spark.sql.execution.datasources.{DataSourceUtils, PartitionedFile, PartitioningAwareFileIndex, SchemaColumnConvertNotSupportedException}
-import org.apache.spark.sql.execution.datasources.parquet.rapids.{AsyncParquetReader, HybridParquetOpts, HybridTableProducer}
+import org.apache.spark.sql.execution.datasources.parquet.rapids.{AsyncParquetReader, HostParquetIterator, HybridParquetOpts}
 import org.apache.spark.sql.execution.datasources.v2.FileScan
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.rapids.ComputeThreadPool
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.sql.sources.Filter
 import org.apache.spark.sql.types._
@@ -1898,11 +1897,11 @@ class MultiFileParquetPartitionReader(
     numThreads, execMetrics)
   with ParquetPartitionReaderBase {
 
-  private val hybridOpts: HybridParquetOpts = {
-    val opts = HybridTableProducer.parseHybridParquetOpts(readOnHostOpts)
-    HybridTableProducer.initialize(opts)
+  /*private val hybridOpts: HybridParquetOpts = {
+    val opts = HostParquetIterator.parseHybridParquetOpts(readOnHostOpts)
+    HostParquetIterator.initialize(opts)
     opts
-  }
+  }*/
 
   // Some implicits to convert the base class to the sub-class and vice versa
   implicit def toMessageType(schema: SchemaBase): MessageType =
@@ -1992,63 +1991,20 @@ class MultiFileParquetPartitionReader(
   override def readBufferToTablesAndClose(dataBuffer: HostMemoryBuffer, dataSize: Long,
       clippedSchema: SchemaBase, readDataSchema: StructType,
       extraInfo: ExtraInfo): GpuDataProducer[Table] = {
-
-    lazy val canReadOnHost = HybridTableProducer.schemaSupportCheck(
-      readDataSchema.fields.map(_.dataType))
-
-    val readOnHost = hybridOpts.mode match {
-      case "CPU_ONLY" =>
-        canReadOnHost
-      case "GPU_ONLY" =>
-        false
-      case _ if hybridOpts.pollInterval > 0 && canReadOnHost =>
-        var ret: Option[Boolean] = None
-        withResource(new NvtxWithMetrics(
-          "hybridPollTime", NvtxColor.WHITE, metrics("hybridPollTime"))) { _ =>
-          var gpuWait = true
-          while (ret.isEmpty) {
-            GpuSemaphore.tryAcquire(TaskContext.get()) match {
-              case SemaphoreAcquired =>
-                ret = Option(false)
-              case AcquireFailed(_) if gpuWait =>
-                gpuWait = false
-                Thread.sleep(hybridOpts.pollInterval)
-              case AcquireFailed(_) =>
-                gpuWait = true
-                if (ComputeThreadPool.bookIdleWorker(hybridOpts.pollInterval)) {
-                  ret = Option(true)
-                }
-            }
-          }
-        }
-        ret.get
-      case _ =>
-        false
+    // The semaphore may be already acquired during polling, but does no harm to keep this
+    // line even so. The metrics here is just for GPU_ONLY mode.
+    withResource(new NvtxWithMetrics(
+      "GPU wait time for Decode", NvtxColor.WHITE, metrics("decodeGpuWait"))) { _ =>
+      GpuSemaphore.acquireIfNecessary(TaskContext.get())
     }
+    val parseOpts = getParquetOptions(readDataSchema, clippedSchema, useFieldId)
 
-    if (readOnHost) {
-      val asyncReader = AsyncParquetReader(conf, hybridOpts.batchSizeBytes.toInt,
-        dataBuffer, 0, dataSize, metrics,
-        extraInfo.dateRebaseMode, extraInfo.timestampRebaseMode, extraInfo.hasInt96Timestamps,
-        clippedSchema, readDataSchema)
-
-      new HybridTableProducer(asyncReader, hybridOpts, metrics)
-    } else {
-      // The semaphore may be already acquired during polling, but does no harm to keep this
-      // line even so. The metrics here is just for GPU_ONLY mode.
-      withResource(new NvtxWithMetrics(
-        "GPU wait time for Decode", NvtxColor.WHITE, metrics("decodeGpuWait"))) { _ =>
-        GpuSemaphore.acquireIfNecessary(TaskContext.get())
-      }
-      val parseOpts = getParquetOptions(readDataSchema, clippedSchema, useFieldId)
-
-      MakeParquetTableProducer(useChunkedReader, useSubPageChunked,
-        conf, currentTargetBatchSize, parseOpts,
-        dataBuffer, 0, dataSize, metrics,
-        extraInfo.dateRebaseMode, extraInfo.timestampRebaseMode,
-        extraInfo.hasInt96Timestamps, isSchemaCaseSensitive, useFieldId, readDataSchema,
-        clippedSchema, splits, debugDumpPrefix, debugDumpAlways)
-    }
+    MakeParquetTableProducer(useChunkedReader, useSubPageChunked,
+      conf, currentTargetBatchSize, parseOpts,
+      dataBuffer, 0, dataSize, metrics,
+      extraInfo.dateRebaseMode, extraInfo.timestampRebaseMode,
+      extraInfo.hasInt96Timestamps, isSchemaCaseSensitive, useFieldId, readDataSchema,
+      clippedSchema, splits, debugDumpPrefix, debugDumpAlways)
   }
 
   override def writeFileHeader(buffer: HostMemoryBuffer, bContext: BatchContext): Long = {
@@ -2148,8 +2104,8 @@ class MultiFileCloudParquetPartitionReader(
   with ParquetPartitionReaderBase {
 
   private val hybridOpts: HybridParquetOpts = {
-    val opts = HybridTableProducer.parseHybridParquetOpts(readOnHostOpts)
-    HybridTableProducer.initialize(opts)
+    val opts = HostParquetIterator.parseHybridParquetOpts(readOnHostOpts)
+    HostParquetIterator.initialize(opts)
     opts
   }
 
@@ -2617,13 +2573,13 @@ class MultiFileCloudParquetPartitionReader(
     }
     val colTypes = readDataSchema.fields.map(f => f.dataType)
 
-    lazy val canReadOnHost = HybridTableProducer.schemaSupportCheck(colTypes)
+    lazy val canReadOnHost = HostParquetIterator.schemaSupportCheck(colTypes)
 
-    val readOnHost = hybridOpts.mode match {
+    val (readOnHost, slotAcquired) = hybridOpts.mode match {
       case "CPU_ONLY" =>
-        canReadOnHost
+        (canReadOnHost, false)
       case "GPU_ONLY" =>
-        false
+        (false, false)
       case _ if hybridOpts.pollInterval > 0 && canReadOnHost =>
         var ret: Option[Boolean] = None
         withResource(new NvtxWithMetrics(
@@ -2638,15 +2594,43 @@ class MultiFileCloudParquetPartitionReader(
                 Thread.sleep(hybridOpts.pollInterval)
               case AcquireFailed(_) =>
                 gpuWait = true
-                if (ComputeThreadPool.bookIdleWorker(hybridOpts.pollInterval)) {
+                if (HostParquetIterator.tryAcquireSlot(hybridOpts)) {
                   ret = Option(true)
                 }
             }
           }
         }
-        ret.get
+        (ret.get, true)
       case _ =>
-        false
+        (false, false)
+    }
+
+    if (readOnHost) {
+      val asyncReader = AsyncParquetReader(conf, hybridOpts.batchSizeBytes.toInt,
+        hostBuffer, 0, dataSize, metrics,
+        dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
+        clippedSchema, readDataSchema,
+        slotAcquired, hybridOpts.async)
+
+      val batchIter = HostParquetIterator(asyncReader, hybridOpts, colTypes, metrics)
+
+      val iterator = if (allPartValues.isDefined) {
+        val allPartInternalRows = allPartValues.get.map(_._2)
+        val rowsPerPartition = allPartValues.get.map(_._1)
+        new GpuColumnarBatchWithPartitionValuesIterator(batchIter, allPartInternalRows,
+          rowsPerPartition, partitionSchema, maxGpuColumnSizeBytes)
+      } else {
+        // this is a bit weird, we don't have number of rows when allPartValues isn't
+        // filled in so can't use GpuColumnarBatchWithPartitionValuesIterator
+        batchIter.flatMap { batch =>
+          // we have to add partition values here for this batch, we already verified that
+          // its not different for all the blocks in this batch
+          BatchWithPartitionDataUtils.addSinglePartitionValueToBatch(batch,
+            partedFile.partitionValues, partitionSchema, maxGpuColumnSizeBytes)
+        }
+      }
+
+      return iterator
     }
 
     RmmRapidsRetryIterator.withRetryNoSplit(hostBuffer) { _ =>
@@ -2654,29 +2638,20 @@ class MultiFileCloudParquetPartitionReader(
       // because we don't want to close it until we know that we are done with it
       hostBuffer.incRefCount()
 
-      val tableReader = if (readOnHost) {
-        val asyncReader = AsyncParquetReader(conf, hybridOpts.batchSizeBytes.toInt,
-          hostBuffer, 0, dataSize, metrics,
-          dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
-          clippedSchema, readDataSchema)
-
-        new HybridTableProducer(asyncReader, hybridOpts, metrics)
-      } else {
-        // The semaphore may be already acquired during polling, but does no harm to keep this
-        // line even so. The metrics here is just for GPU_ONLY mode.
-        withResource(new NvtxWithMetrics(
-          "GPU wait time for Decode", NvtxColor.WHITE, metrics("decodeGpuWait"))) { _ =>
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        }
-
-        MakeParquetTableProducer(useChunkedReader, subPageChunked,
-          conf, targetBatchSizeBytes,
-          parseOpts,
-          hostBuffer, 0, dataSize, metrics,
-          dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
-          isSchemaCaseSensitive, useFieldId, readDataSchema, clippedSchema, files,
-          debugDumpPrefix, debugDumpAlways)
+      // The semaphore may be already acquired during polling, but does no harm to keep this
+      // line even so.
+      withResource(new NvtxWithMetrics(
+        "GPU wait time for Decode", NvtxColor.WHITE, metrics("decodeGpuWait"))) { _ =>
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
       }
+
+      val tableReader = MakeParquetTableProducer(useChunkedReader, subPageChunked,
+        conf, targetBatchSizeBytes,
+        parseOpts,
+        hostBuffer, 0, dataSize, metrics,
+        dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
+        isSchemaCaseSensitive, useFieldId, readDataSchema, clippedSchema, files,
+        debugDumpPrefix, debugDumpAlways)
 
       val batchIter = CachedGpuBatchIterator(tableReader, colTypes)
 
