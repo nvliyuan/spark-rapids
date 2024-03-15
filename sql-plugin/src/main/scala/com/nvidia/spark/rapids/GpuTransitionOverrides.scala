@@ -775,6 +775,15 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
     }
   }
 
+  /**
+   * So far (2024-03-15) the DataWritingCommandExec in Spark always returns empty data,
+   * so the following ColumnarToRow is useless. Safe to remove it.
+   */
+  private def removeUselessColumnarToRow(plan: SparkPlan): SparkPlan = plan match {
+    case GpuColumnarToRowExec(child @ GpuDataWritingCommandExec(_, _), _) => child
+    case _ => plan
+  }
+
   override def apply(sparkPlan: SparkPlan): SparkPlan = GpuOverrideUtil.tryOverride { plan =>
     this.rapidsConf = new RapidsConf(plan.conf)
     if (rapidsConf.isSqlEnabled && rapidsConf.isSqlExecuteOnGPU) {
@@ -829,7 +838,8 @@ class GpuTransitionOverrides extends Rule[SparkPlan] {
         }
 
         insertStageLevelMetrics(updatedPlan)
-        updatedPlan
+        // TODO Add a config to support disabling this rule
+        removeUselessColumnarToRow(updatedPlan)
       }
     } else {
       plan

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.
+ * Copyright (c) 2019-2024, NVIDIA CORPORATION.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -109,6 +109,10 @@ object GpuDataWritingCommand {
   }
 }
 
+/**
+ * GpuDataWritingCommandExec is usually the root operator, and so far it returns
+ * empty data, so it is safe to make it support row-based execution.
+ */
 case class GpuDataWritingCommandExec(cmd: GpuDataWritingCommand, child: SparkPlan)
     extends ShimUnaryExecNode with GpuExec {
   override lazy val allMetrics: Map[String, GpuMetric] = GpuMetric.wrap(cmd.metrics)
@@ -123,18 +127,41 @@ case class GpuDataWritingCommandExec(cmd: GpuDataWritingCommand, child: SparkPla
   // override the default one, otherwise the `cmd.nodeName` will appear twice from simpleString
   override def argString(maxFields: Int): String = cmd.argString(maxFields)
 
-  override def executeCollect(): Array[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
+  override def executeCollect(): Array[InternalRow] = {
+    if (sideEffectResult.isEmpty) {
+      Array.empty[InternalRow]
+    } else {
+      throw new UnsupportedOperationException(
+        s"${getClass.getCanonicalName} does not support row-based execution")
+    }
+  }
 
-  override def executeToIterator: Iterator[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
+  override def executeToIterator: Iterator[InternalRow] = {
+    if (sideEffectResult.isEmpty) {
+      Iterator.empty
+    } else {
+      throw new UnsupportedOperationException(
+        s"${getClass.getCanonicalName} does not support row-based execution")
+    }
+  }
 
-  override def executeTake(limit: Int): Array[InternalRow] =
-    throw new UnsupportedOperationException(
-      s"${getClass.getCanonicalName} does not support row-based execution")
+  override def executeTake(limit: Int): Array[InternalRow] = {
+    if (sideEffectResult.isEmpty) {
+      Array.empty[InternalRow]
+    } else {
+      throw new UnsupportedOperationException(
+        s"${getClass.getCanonicalName} does not support row-based execution")
+    }
+  }
 
-  protected override def doExecute(): RDD[InternalRow] = throw new UnsupportedOperationException(
-    s"${getClass.getCanonicalName} does not support row-based execution")
+  protected override def doExecute(): RDD[InternalRow] = {
+    if (sideEffectResult.isEmpty) {
+      sparkContext.parallelize(Seq.empty[InternalRow], 1)
+    } else {
+      throw new UnsupportedOperationException(
+        s"${getClass.getCanonicalName} does not support row-based execution")
+    }
+  }
 
   override protected def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     sparkContext.parallelize(sideEffectResult, 1)
