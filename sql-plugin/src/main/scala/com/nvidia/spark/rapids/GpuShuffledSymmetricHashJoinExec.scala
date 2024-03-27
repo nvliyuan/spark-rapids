@@ -676,9 +676,11 @@ class SpillableHostConcatResultFromColumnarBatchIterator(
       require(batch.numCols() > 0, "Batch must have at least 1 column")
       batch.column(0) match {
         case col: SerializedTableColumn =>
+          val header = col.header
           val buffer = col.hostBuffer
+          header.incRefCount()
           buffer.incRefCount()
-          new SpillableHostConcatResult(col.header, buffer)
+          new SpillableHostConcatResult(header, buffer)
         case c =>
           throw new IllegalStateException(s"Expected SerializedTableColumn, got ${c.getClass}")
       }
