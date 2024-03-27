@@ -4118,7 +4118,7 @@ object GpuOverrides extends Logging {
                     takeExec.child.output,
                     childPlans.head.convertIfNeeded())(takeExec.sortOrder),
                   ENSURE_REQUIREMENTS
-                )(SinglePartition)
+                )(SinglePartition, conf)
               )(takeExec.sortOrder)
             }
           }

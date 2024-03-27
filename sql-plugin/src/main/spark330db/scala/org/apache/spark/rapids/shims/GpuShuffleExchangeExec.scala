@@ -19,7 +19,7 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuPartitioning
+import com.nvidia.spark.rapids.{GpuPartitioning, RapidsConf}
 
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
@@ -31,9 +31,10 @@ case class GpuShuffleExchangeExec(
     gpuOutputPartitioning: GpuPartitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin)(
-    cpuOutputPartitioning: Partitioning)
+    cpuOutputPartitioning: Partitioning,
+    rapidsConf: RapidsConf)
   extends GpuDatabricksShuffleExchangeExecBase(gpuOutputPartitioning,
-    child, shuffleOrigin)(cpuOutputPartitioning) {
+    child, shuffleOrigin)(cpuOutputPartitioning, rapidsConf) {
 
     override def getShuffleRDD(partitionSpecs: Array[ShufflePartitionSpec]): RDD[_] = {
         new ShuffledBatchRDD(shuffleDependencyColumnar, metrics ++ readMetrics, partitionSpecs)

@@ -196,7 +196,7 @@ class GpuCollectLimitMeta(
         GpuSinglePartitioning,
         GpuLocalLimitExec(collectLimit.limit, childPlans.head.convertIfNeeded()),
         ENSURE_REQUIREMENTS
-      )(SinglePartition), 0)
+      )(SinglePartition, conf), 0)
 }
 
 object GpuTopN {

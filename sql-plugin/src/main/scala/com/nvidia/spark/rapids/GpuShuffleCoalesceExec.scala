@@ -21,6 +21,7 @@ import scala.collection.mutable.ArrayBuffer
 import ai.rapids.cudf.{NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
+import com.nvidia.spark.rapids.jni.ConcatUtil
 import com.nvidia.spark.rapids.shims.ShimUnaryExecNode
 
 import org.apache.spark.TaskContext
@@ -129,6 +130,8 @@ class GpuShuffleCoalesceIterator(
       val batchTables = serializedTables.take(numTablesInBatch)
       if (batchTables.head.numColumns == 0) {
         val batch = new ColumnarBatch(Array.empty, numRowsInBatch)
+        serializedTables.remove(0, numTablesInBatch)
+        batchTables.safeClose()
         // We acquire the GPU even on an empty batch, because the downstream tasks expect this
         // iterator to acquire the semaphore and may generate GPU data from batches that are empty.
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
@@ -157,16 +160,19 @@ class GpuShuffleCoalesceIterator(
 
   private def computeDataRanges(tables: ArrayBuffer[SerializedTableColumn]): Array[Long] = {
     val ranges = new ArrayBuffer[Long]
+    var lastAddress = 0L
+    var lastSize = 0L
     tables.foreach { table =>
       val tableAddress = table.hostBuffer.getAddress
       val tableSize = table.hostBuffer.getLength
-      if (ranges.nonEmpty && ranges.last == tableAddress) {
-        ranges.update(ranges.size - 1, tableAddress + tableSize)
-        ranges.append(table.hostBuffer.getAddress)
-        ranges.append(table.hostBuffer.getLength)
+      if (ranges.nonEmpty && lastAddress == tableAddress) {
+        lastSize += tableSize
+        ranges.update(ranges.length - 1, lastSize)
       } else {
         ranges.append(tableAddress)
-        ranges.append(tableAddress + tableSize)
+        ranges.append(tableSize)
+        lastSize = tableSize
+        lastAddress = tableAddress + lastSize
       }
     }
     ranges.toArray

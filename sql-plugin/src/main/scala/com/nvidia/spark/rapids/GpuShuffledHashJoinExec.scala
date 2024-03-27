@@ -274,7 +274,8 @@ object GpuShuffledHashJoinExec extends Logging {
 
       // Let batches coalesce for size overflow check
       val coalesceBuiltIter = if (isBuildSerialized) {
-        new HostShuffleCoalesceIterator(bufBuildIter, targetSize, coalesceMetrics)
+        throw new UnsupportedOperationException("not done yet")
+        //new HostShuffleCoalesceIterator(bufBuildIter, targetSize, coalesceMetrics)
       } else { // Batches on GPU have already coalesced to the target size by the given goal.
         bufBuildIter
       }
@@ -305,8 +306,7 @@ object GpuShuffledHashJoinExec extends Logging {
             coalesceBuiltIter
           val gpuBuildIter = if (isBuildSerialized) {
             // batches on host, move them to GPU
-            new GpuShuffleCoalesceIterator(safeIter.asInstanceOf[Iterator[HostConcatResult]],
-              buildTypes, coalesceMetrics)
+            new GpuShuffleCoalesceIterator(safeIter, buildTypes, targetSize, coalesceMetrics)
           } else { // batches already on GPU
             safeIter.asInstanceOf[Iterator[ColumnarBatch]]
           }

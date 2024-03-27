@@ -54,11 +54,11 @@ case class GpuShuffleExchangeExec(
     shuffleOrigin: ShuffleOrigin,
     advisoryPartitionSize: Option[Long] = None)(
     cpuOutputPartitioning: Partitioning,
-    rapidsConf: RapidsConf)
+    @transient rapidsConf: RapidsConf)
     extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child, rapidsConf)
         with ShuffleExchangeLike {
 
-  override def otherCopyArgs: Seq[AnyRef] = cpuOutputPartitioning :: Nil
+  override def otherCopyArgs: Seq[AnyRef] = Seq(cpuOutputPartitioning, rapidsConf)
 
   override val outputPartitioning: Partitioning = cpuOutputPartitioning
 

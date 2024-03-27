@@ -20,7 +20,7 @@
 spark-rapids-shim-json-lines ***/
 package org.apache.spark.rapids.shims
 
-import com.nvidia.spark.rapids.GpuPartitioning
+import com.nvidia.spark.rapids.{GpuPartitioning, RapidsConf}
 
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.catalyst.plans.physical.Partitioning
@@ -32,11 +32,12 @@ abstract class GpuDatabricksShuffleExchangeExecBase(
     gpuOutputPartitioning: GpuPartitioning,
     child: SparkPlan,
     shuffleOrigin: ShuffleOrigin)(
-    cpuOutputPartitioning: Partitioning)
-  extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child)
+    cpuOutputPartitioning: Partitioning,
+    rapidsConf: RapidsConf)
+  extends GpuShuffleExchangeExecBaseWithMetrics(gpuOutputPartitioning, child, rapidsConf)
       with ShuffleExchangeLike {
 
-  override def otherCopyArgs: Seq[AnyRef] = cpuOutputPartitioning :: Nil
+  override def otherCopyArgs: Seq[AnyRef] = Seq(cpuOutputPartitioning, rapidsConf)
 
   override val outputPartitioning: Partitioning = cpuOutputPartitioning
 
