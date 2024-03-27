@@ -144,15 +144,16 @@ class GpuShuffleCoalesceIterator(
         opTime += System.nanoTime() - startTime
         GpuSemaphore.acquireIfNecessary(TaskContext.get())
         opTime.ns {
-          val table = ConcatUtil.concatSerializedTables(headerAddrs, dataRanges)
-          outputBatches += 1
-          outputRows += numRowsInBatch
-          numTablesInBatch = 0
-          numRowsInBatch = 0
-          batchByteSize = 0
-          serializedTables.remove(0, numTablesInBatch)
-          batchTables.safeClose()
-          GpuColumnVector.from(table, dataTypes)
+          withResource(ConcatUtil.concatSerializedTables(headerAddrs, dataRanges)) { table =>
+            serializedTables.remove(0, numTablesInBatch)
+            outputBatches += 1
+            outputRows += numRowsInBatch
+            numTablesInBatch = 0
+            numRowsInBatch = 0
+            batchByteSize = 0
+            batchTables.safeClose()
+            GpuColumnVector.from(table, dataTypes)
+          }
         }
       }
     }
@@ -166,6 +167,7 @@ class GpuShuffleCoalesceIterator(
       val tableAddress = table.hostBuffer.getAddress
       val tableSize = table.hostBuffer.getLength
       if (ranges.nonEmpty && lastAddress == tableAddress) {
+        lastAddress += tableSize
         lastSize += tableSize
         ranges.update(ranges.length - 1, lastSize)
       } else {
