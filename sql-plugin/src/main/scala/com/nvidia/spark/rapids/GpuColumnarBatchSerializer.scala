@@ -58,11 +58,11 @@ class SerializedBatchIterator(headerSize: Int, hostDataBatchSize: Long, in: Inpu
     }
   }
 
-  def tryReadNextHeader(): Unit = {
+  def tryReadNextHeader(): Option[Long] = {
     if (!streamClosed && nextHeader.isEmpty) {
       withResource(new NvtxRange("Read Header", NvtxColor.YELLOW)) { _ =>
         var atEOF = false
-        val hmb = new HostMemoryBuffer(headerSize, false)
+        val hmb = HostMemoryBuffer.allocate(headerSize, false)
         closeOnExcept(hmb) { _ =>
           val bb = hmb.asByteBuffer()
           while (!atEOF && bb.hasRemaining) {
@@ -84,12 +84,13 @@ class SerializedBatchIterator(headerSize: Int, hostDataBatchSize: Long, in: Inpu
         }
       }
     }
+    nextHeader.map(getDataLen)
   }
 
   private def tryReadNext(): Option[ColumnarBatch] = nextHeader.map { header =>
     withResource(new NvtxRange("Read Batch", NvtxColor.YELLOW)) { _ =>
-      val numColumns = getNumColumns(header)
-      val numRows = getNumRows(header)
+      val numColumns = SerializedTableColumn.getNumColumns(header)
+      val numRows = SerializedTableColumn.getNumRows(header)
       if (numColumns > 0) {
         val dataLen = getDataLen(header)
         val hmb: HostMemoryBuffer = if (dataLen > hostDataBatchSize) {
@@ -142,20 +143,6 @@ class SerializedBatchIterator(headerSize: Int, hostDataBatchSize: Long, in: Inpu
     toBeReturned = None
     nextHeader = None
     (0, ret)
-  }
-
-  private def getNumColumns(header: HostMemoryBuffer): Int = {
-    // HACK: This knows too much about the JCudfSerialization format
-    // read big-endian int from table header for number of columns
-    val x = header.getInt(6)
-    java.lang.Integer.reverseBytes(x)
-  }
-
-  private def getNumRows(header: HostMemoryBuffer): Int = {
-    // HACK: This knows too much about the JCudfSerialization format
-    // read big-endian int from table header for number of rows
-    val x = header.getInt(10)
-    java.lang.Integer.reverseBytes(x)
   }
 
   private def getDataLen(header: HostMemoryBuffer): Long = {
@@ -379,6 +366,33 @@ object SerializedTableColumn {
    * the specified serialized table.
    *
    * @param header header data for the serialized table
+   * @return columnar batch to be passed to [[GpuShuffleCoalesceExec]]
+   */
+  def from(header: HostMemoryBuffer): ColumnarBatch = {
+    val numColumns = getNumColumns(header)
+    val numRows = getNumRows(header)
+    from(header, numColumns, numRows)
+  }
+
+  /**
+   * Build a `ColumnarBatch` consisting of a single [[SerializedTableColumn]] describing
+   * the specified serialized table.
+   *
+   * @param header header data for the serialized table
+   * @param data the table data
+   * @return columnar batch to be passed to [[GpuShuffleCoalesceExec]]
+   */
+  def from(header: HostMemoryBuffer, data: HostMemoryBuffer): ColumnarBatch = {
+    val numColumns = getNumColumns(header)
+    val numRows = getNumRows(header)
+    from(header, numColumns, numRows, data)
+  }
+
+  /**
+   * Build a `ColumnarBatch` consisting of a single [[SerializedTableColumn]] describing
+   * the specified serialized table.
+   *
+   * @param header header data for the serialized table
    * @param numColumns number of columns in the table
    * @param numRows number of rows in the table
    * @return columnar batch to be passed to [[GpuShuffleCoalesceExec]]
@@ -418,5 +432,19 @@ object SerializedTableColumn {
       }
     }
     sum
+  }
+
+  def getNumColumns(header: HostMemoryBuffer): Int = {
+    // HACK: This knows too much about the JCudfSerialization format
+    // read big-endian int from table header for number of columns
+    val x = header.getInt(6)
+    java.lang.Integer.reverseBytes(x)
+  }
+
+  def getNumRows(header: HostMemoryBuffer): Int = {
+    // HACK: This knows too much about the JCudfSerialization format
+    // read big-endian int from table header for number of rows
+    val x = header.getInt(10)
+    java.lang.Integer.reverseBytes(x)
   }
 }

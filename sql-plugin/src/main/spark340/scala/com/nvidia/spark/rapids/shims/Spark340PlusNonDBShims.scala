@@ -92,7 +92,7 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
                     takeExec.child.output,
                     childPlans.head.convertIfNeeded())(takeExec.sortOrder),
                   ENSURE_REQUIREMENTS
-                )(SinglePartition),
+                )(SinglePartition, conf),
                 takeExec.offset)(takeExec.sortOrder)
             }
           }
@@ -109,7 +109,7 @@ trait Spark340PlusNonDBShims extends Spark331PlusNonDBShims {
               GpuSinglePartitioning,
               GpuLocalLimitExec(collectLimit.limit, childPlans.head.convertIfNeeded()),
               ENSURE_REQUIREMENTS
-            )(SinglePartition), collectLimit.offset)
+            )(SinglePartition, conf), collectLimit.offset)
       }
     ).disabledByDefault("Collect Limit replacement can be slower on the GPU, if huge number " +
         "of rows in a batch it could help by limiting the number of rows transferred from " +

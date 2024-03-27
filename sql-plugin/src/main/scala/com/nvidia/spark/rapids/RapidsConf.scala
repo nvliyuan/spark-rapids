@@ -1569,7 +1569,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       "a dedicated buffer.")
     .internal()
     .bytesConf(ByteUnit.BYTE)
-    .createWithDefault("8M")
+    .createWithDefault(8 * 1024 * 1024)
 
   val SHUFFLE_MANAGER_ENABLED = conf("spark.rapids.shuffle.enabled")
     .doc("Enable or disable the RAPIDS Shuffle Manager at runtime. " +

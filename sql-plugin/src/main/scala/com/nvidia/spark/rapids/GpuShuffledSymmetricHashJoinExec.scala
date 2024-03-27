@@ -19,7 +19,6 @@ package com.nvidia.spark.rapids
 import scala.collection.{mutable, BitSet}
 
 import ai.rapids.cudf.{ContiguousTable, HostMemoryBuffer}
-import ai.rapids.cudf.JCudfSerialization.SerializedTableHeader
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.GpuMetric._
 import com.nvidia.spark.rapids.GpuShuffledSymmetricHashJoinExec.JoinInfo
@@ -249,23 +248,19 @@ object GpuShuffledSymmetricHashJoinExec {
         batchTypes: Array[DataType],
         gpuBatchSizeBytes: Long,
         metrics: Map[String, GpuMetric]): Iterator[ColumnarBatch] = {
-      val concatMetrics = getConcatMetrics(metrics)
-      val bufferedCoalesceIter = new CloseableBufferedIterator(
-        new HostShuffleCoalesceIterator(
-          new HostQueueBatchIterator(queue, remainingIter),
-          gpuBatchSizeBytes,
-          concatMetrics))
-      // Force a coalesce of the first batch before we grab the GPU semaphore
-      bufferedCoalesceIter.headOption
-      new GpuShuffleCoalesceIterator(bufferedCoalesceIter, batchTypes, concatMetrics)
+      new GpuShuffleCoalesceIterator(
+        new HostQueueBatchIterator(queue, remainingIter),
+        batchTypes,
+        gpuBatchSizeBytes,
+        metrics)
     }
 
     override def getProbeBatchRowCount(batch: SpillableHostConcatResult): Long = {
-      batch.header.getNumRows
+      batch.numRows
     }
 
     override def getProbeBatchDataSize(batch: SpillableHostConcatResult): Long = {
-      batch.header.getDataLen
+      batch.dataSize
     }
 
     override val startWithLeftSide: Boolean = true
@@ -543,8 +538,9 @@ case class GpuShuffledSymmetricHashJoinExec(
     val sizer = new SpillableColumnarBatchJoinSizer(startWithLeftSide = true)
     val concatMetrics = getConcatMetrics(metrics)
     val leftIter = new GpuShuffleCoalesceIterator(
-      new HostShuffleCoalesceIterator(rawLeftIter, gpuBatchSizeBytes, concatMetrics),
+      rawLeftIter,
       leftOutput.map(_.dataType).toArray,
+      gpuBatchSizeBytes,
       concatMetrics)
     sizer.getJoinInfo(joinType, leftKeys, leftOutput, leftIter, rightKeys, rightOutput, rightIter,
       condition, gpuBatchSizeBytes, metrics)
@@ -568,8 +564,9 @@ case class GpuShuffledSymmetricHashJoinExec(
     val sizer = new SpillableColumnarBatchJoinSizer(startWithLeftSide = false)
     val concatMetrics = getConcatMetrics(metrics)
     val rightIter = new GpuShuffleCoalesceIterator(
-      new HostShuffleCoalesceIterator(rawRightIter, gpuBatchSizeBytes, concatMetrics),
+      rawRightIter,
       rightOutput.map(_.dataType).toArray,
+      gpuBatchSizeBytes,
       concatMetrics)
     sizer.getJoinInfo(joinType, leftKeys, leftOutput, leftIter, rightKeys, rightOutput, rightIter,
       condition, gpuBatchSizeBytes, metrics)
@@ -624,23 +621,45 @@ case class GpuShuffledSymmetricHashJoinExec(
  * A spillable form of a HostConcatResult. Takes ownership of the specified host buffer.
  */
 class SpillableHostConcatResult(
-    val header: SerializedTableHeader,
-    hmb: HostMemoryBuffer) extends AutoCloseable {
-  private var buffer = {
-    SpillableHostBuffer(hmb, hmb.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY)
+    header: HostMemoryBuffer,
+    data: HostMemoryBuffer) extends AutoCloseable {
+  val numColumns: Int = SerializedTableColumn.getNumColumns(header)
+  val numRows: Int = SerializedTableColumn.getNumRows(header)
+  val dataSize: Long = data.getLength
+  private var headerBuffer: Option[SpillableHostBuffer] =
+    Some(SpillableHostBuffer(header, header.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY))
+  private var dataBuffer: Option[SpillableHostBuffer] =
+    Some(SpillableHostBuffer(data, data.getLength, SpillPriorities.ACTIVE_BATCHING_PRIORITY))
+
+  def releaseHeader(): HostMemoryBuffer = {
+    if (headerBuffer.isEmpty) {
+      throw new IllegalStateException("no header")
+    }
+    val spillable = headerBuffer.get
+    headerBuffer = None
+    closeOnExcept(spillable.getHostBuffer()) { buffer =>
+      spillable.safeClose()
+      buffer
+    }
   }
 
-  def getHostMemoryBufferAndClose(): HostMemoryBuffer = {
-    val hostBuffer = buffer.getHostBuffer()
-    closeOnExcept(hostBuffer) { _ =>
-      close()
+  def releaseDataBuffer(): HostMemoryBuffer = {
+    if (dataBuffer.isEmpty) {
+      throw new IllegalStateException("no data")
     }
-    hostBuffer
+    val spillable = dataBuffer.get
+    dataBuffer = None
+    closeOnExcept(spillable.getHostBuffer()) { buffer =>
+      spillable.safeClose()
+      buffer
+    }
   }
 
   override def close(): Unit = {
-    buffer.close()
-    buffer = null
+    headerBuffer.foreach(_.safeClose())
+    headerBuffer = None
+    dataBuffer.foreach(_.safeClose())
+    dataBuffer = None
   }
 }
 
@@ -683,9 +702,10 @@ class HostQueueBatchIterator(
 
   override def next(): ColumnarBatch = {
     if (spillableQueue.nonEmpty) {
-      val shcr = spillableQueue.dequeue()
-      closeOnExcept(shcr.getHostMemoryBufferAndClose()) { hostBuffer =>
-        SerializedTableColumn.from(shcr.header, hostBuffer)
+      withResource(spillableQueue.dequeue()) { shcr =>
+        closeOnExcept(shcr.releaseDataBuffer()) { data =>
+          SerializedTableColumn.from(shcr.releaseHeader(), data)
+        }
       }
     } else {
       batchIter.next()

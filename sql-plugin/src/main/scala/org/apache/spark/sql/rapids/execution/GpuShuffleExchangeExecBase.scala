@@ -130,7 +130,7 @@ abstract class GpuShuffleMetaBase(
       childParts.head.convertToGpu(),
       newChild,
       shuffle.shuffleOrigin
-    )(shuffle.outputPartitioning)
+    )(shuffle.outputPartitioning, conf)
   }
 }
 
@@ -149,7 +149,9 @@ object GpuShuffleMetaBase {
  */
 abstract class GpuShuffleExchangeExecBaseWithMetrics(
     gpuOutputPartitioning: GpuPartitioning,
-    child: SparkPlan) extends GpuShuffleExchangeExecBase(gpuOutputPartitioning, child) {
+    child: SparkPlan,
+    rapidsConf: RapidsConf)
+  extends GpuShuffleExchangeExecBase(gpuOutputPartitioning, child, rapidsConf) {
 
   // 'mapOutputStatisticsFuture' is only needed when enable AQE.
   @transient lazy val mapOutputStatisticsFuture: Future[MapOutputStatistics] = {
