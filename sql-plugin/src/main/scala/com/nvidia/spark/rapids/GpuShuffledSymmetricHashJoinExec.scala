@@ -248,11 +248,12 @@ object GpuShuffledSymmetricHashJoinExec {
         batchTypes: Array[DataType],
         gpuBatchSizeBytes: Long,
         metrics: Map[String, GpuMetric]): Iterator[ColumnarBatch] = {
+      val concatMetrics = getConcatMetrics(metrics)
       new GpuShuffleCoalesceIterator(
         new HostQueueBatchIterator(queue, remainingIter),
         batchTypes,
         gpuBatchSizeBytes,
-        metrics)
+        concatMetrics)
     }
 
     override def getProbeBatchRowCount(batch: SpillableHostConcatResult): Long = {
