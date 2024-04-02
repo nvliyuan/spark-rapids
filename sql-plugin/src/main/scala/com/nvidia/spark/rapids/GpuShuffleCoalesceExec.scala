@@ -148,9 +148,9 @@ class GpuShuffleCoalesceIterator(
             serializedTables.remove(0, numTablesInBatch)
             outputBatches += 1
             outputRows += numRowsInBatch
-            numTablesInBatch = 0
-            numRowsInBatch = 0
-            batchByteSize = 0
+            numTablesInBatch = serializedTables.length
+            numRowsInBatch = serializedTables.map(_.numRows).sum
+            batchByteSize = serializedTables.map(_.hostBuffer.getLength).sum
             batchTables.safeClose()
             GpuColumnVector.from(table, dataTypes)
           }
