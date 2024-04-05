@@ -18,7 +18,7 @@ package com.nvidia.spark.rapids
 
 import scala.collection.mutable.ArrayBuffer
 
-import ai.rapids.cudf.{NvtxColor, NvtxRange}
+import ai.rapids.cudf.{Cuda, NvtxColor, NvtxRange}
 import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.jni.ConcatUtil
@@ -151,6 +151,7 @@ class GpuShuffleCoalesceIterator(
             numTablesInBatch = serializedTables.length
             numRowsInBatch = serializedTables.map(_.numRows).sum
             batchByteSize = serializedTables.map(_.hostBuffer.getLength).sum
+            Cuda.DEFAULT_STREAM.sync()
             batchTables.safeClose()
             GpuColumnVector.from(table, dataTypes)
           }
