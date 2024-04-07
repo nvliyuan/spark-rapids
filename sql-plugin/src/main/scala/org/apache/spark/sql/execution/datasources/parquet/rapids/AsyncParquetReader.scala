@@ -18,15 +18,15 @@ package org.apache.spark.sql.execution.datasources.parquet.rapids
 
 import java.util.TimeZone
 import java.util.concurrent.{LinkedBlockingQueue, Semaphore, TimeUnit}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.locks.ReentrantLock
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
-import ai.rapids.cudf.{HostColumnVector, HostMemoryBuffer, NvtxColor, Table}
+import ai.rapids.cudf.{ColumnVector, HostColumnVector, HostMemoryBuffer, NvtxColor, Scalar, Table}
 import com.nvidia.spark.rapids.{DateTimeRebaseMode, GpuColumnVector, GpuMetric, GpuSemaphore, HMBInputFile, NvtxWithMetrics}
-import com.nvidia.spark.rapids.Arm.withResource
+import com.nvidia.spark.rapids.Arm.{closeOnExcept, withResource}
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{AutoCloseableAttemptSpliterator, RmmRapidsRetryAutoCloseableIterator}
 import org.apache.hadoop.conf.Configuration
@@ -35,6 +35,7 @@ import org.apache.parquet.VersionParser.ParsedVersion
 import org.apache.parquet.column.page.PageReadStore
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.schema.MessageType
+import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 import org.json4s._
 import org.json4s.DefaultFormats
 import org.json4s.jackson.JsonMethods._
@@ -44,14 +45,32 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector
 import org.apache.spark.sql.rapids.ComputeThreadPool
 import org.apache.spark.sql.rapids.ComputeThreadPool.TaskWithPriority
-import org.apache.spark.sql.types.{ArrayType, BinaryType, DataType, DecimalType, MapType, StructType}
+import org.apache.spark.sql.types.{ArrayType, BinaryType, DataType, DecimalType, IntegerType, MapType, StructField, StructType}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 
+case class HostDictionaryInfo(columnIndices: Array[Int],
+                              vectors: Array[HostColumnVector],
+                              dictSliceOffsets: Array[Array[Int]],
+                              leafColumnOffsets: Array[Int],
+                              rowGroupOffsets: Array[Int])
+
+case class DeviceDictionaryInfo(columnIndices: Array[Int],
+                                vectors: Array[ColumnVector],
+                                dictSliceOffsets: Array[Array[Int]],
+                                leafColumnOffsets: Array[Int],
+                                rowGroupOffsets: Array[Int])
+
 case class AsyncBatchResult(data: Array[HostColumnVector],
+                            dictInfo: Option[HostDictionaryInfo],
+                            globalRowOffset: Int,
+                            sizeInRow: Int,
                             sizeInByte: Long) extends AutoCloseable {
   override def close(): Unit = {
     data.safeClose()
+    // DictionaryInfo is task-level global context. We only close the DictVector after finishing
+    // all parquet reading work.
+    // dictInfo.foreach(_.vectors.map(_._2).safeClose())
   }
 }
 
@@ -68,7 +87,8 @@ class AsyncParquetReader(
     timestampRebaseMode: DateTimeRebaseMode,
     clippedSchema: MessageType,
     slotAcquired: Boolean,
-    asynchronous: Boolean = true)
+    enableDictLateMat: Boolean,
+    asynchronous: Boolean)
   extends Iterator[AsyncBatchResult] with AutoCloseable with Logging {
 
   private type Element = Either[AsyncBatchResult, Throwable]
@@ -99,11 +119,6 @@ class AsyncParquetReader(
     // The fileSchema here has already been clipped
     reader.setRequestedSchema(clippedSchema)
     reader
-  }
-
-  private val parquetColumn: ParquetColumn = {
-    val converter = new ParquetToSparkSchemaConverter()
-    converter.convertParquetColumn(clippedSchema, None)
   }
 
   private val writerVersion: ParsedVersion = try {
@@ -145,21 +160,151 @@ class AsyncParquetReader(
   }
   private val consumedBatches = new AtomicInteger(0)
   private val producedBatches = new AtomicInteger(0)
+  @volatile private var globalRowOffset = 0
 
-  private lazy val hostColumnBuilders: Array[HostWritableColumnVector] = {
-    parquetColumn.sparkType.asInstanceOf[StructType].fields.map { f =>
+  private val parquetColumn: ParquetColumn = {
+    val converter = new ParquetToSparkSchemaConverter()
+    converter.convertParquetColumn(clippedSchema, None)
+  }
+
+  // compute while assembling dictionary columns
+  // column offsets for the layout of flattened leaf columns
+  private var parquetLeafOffsets: Array[Int] = _
+  // row offsets of each row group
+  private var rowGroupRowOffsets: Array[Int] = _
+  // indicate whether a top-level field contains DictLateMaterialize conversion or not
+  private var hasDctLatMat: Array[Boolean] = _
+
+  private lazy val dictColumns: mutable.TreeMap[Int, (HostColumnVector, Array[Int])] = {
+    if (!enableDictLateMat) {
+      mutable.TreeMap.empty[Int, (HostColumnVector, Array[Int])]
+    } else {
+      logError(s"[$taskID] Row Group size ${rowGroupQueue.size}")
+
+      val builder = mutable.TreeMap.empty[Int, (HostColumnVector, Array[Int])]
+      val stack = mutable.Stack[ParquetColumn]()
+      val leafOffsetsBuffer = mutable.ArrayBuffer[Int](0)
+      val fieldHasDctLatMat = mutable.ArrayBuffer[Boolean]()
+      var leafIndex = 0
+
+      parquetColumn.children.foreach { column =>
+        val numDictFound = builder.size
+        stack.push(column)
+        while (stack.nonEmpty) {
+          stack.pop() match {
+            // TODO: support Dictionary late materialize on columns of nested type
+            case c if c.isPrimitive && c == column =>
+              val descriptor = c.descriptor.get
+              val typeName = descriptor.getPrimitiveType.getPrimitiveTypeName
+              if (typeName == PrimitiveTypeName.BINARY) {
+                DictLateMatUtils.extractDict(rowGroupQueue, descriptor) match {
+                  case None =>
+                    logError(s"[$taskID] Column ${c.path.mkString(".")} is NOT all dictEncoded")
+                  case Some(info) =>
+                    if (rowGroupRowOffsets == null) {
+                      val rgRowOff = Array.ofDim[Int](rowGroupQueue.size + 1)
+                      rowGroupQueue.indices.foreach { i =>
+                        rgRowOff(i + 1) = rgRowOff(i) + rowGroupQueue(i).getRowCount.toInt
+                      }
+                      rowGroupRowOffsets = rgRowOff
+                    }
+                    builder.put(leafIndex, info.dictVector -> info.dictPageOffsets)
+                    logError(s"[$taskID] Column ${c.path.mkString(".")} is all dictEncoded")
+                }
+              }
+              leafIndex += 1
+            case c if c.isPrimitive =>
+              leafIndex += 1
+            case cv =>
+              cv.children.reverseIterator.foreach(stack.push)
+          }
+        }
+        leafOffsetsBuffer += leafIndex
+        fieldHasDctLatMat += builder.size > numDictFound
+      }
+
+      if (builder.nonEmpty) {
+        parquetLeafOffsets = leafOffsetsBuffer.toArray
+      }
+      hasDctLatMat = fieldHasDctLatMat.toArray
+
+      builder
+    }
+  }
+
+  private lazy val dataColumnBuilders: Array[HostWritableColumnVector] = {
+    sparkTypesWithDict.fields.map { f =>
       new HostWritableColumnVector(rowBatchSize min totalRowCnt, f.dataType)
+    }
+  }
+
+  private lazy val sparkTypesWithDict: StructType = {
+    if (dictColumns.isEmpty) {
+      parquetColumn.sparkType.asInstanceOf[StructType]
+    } else {
+      val emptyBuf = () => mutable.ArrayBuffer[StructField]()
+
+      var leafIndex = 0
+      val rootBuffer = emptyBuf()
+      val stack = mutable.Stack[(StructField,
+        mutable.ArrayBuffer[StructField], mutable.ArrayBuffer[StructField])](
+        (StructField("", parquetColumn.sparkType, nullable = false), rootBuffer, emptyBuf()))
+
+      while (stack.nonEmpty) {
+        val (field, parentBuffer, childBuffer) = stack.head
+        field.dataType match {
+          case st: StructType =>
+            if (st.fields.isEmpty || childBuffer.nonEmpty) {
+              parentBuffer += StructField(field.name, StructType(childBuffer), field.nullable)
+              stack.pop()
+            } else {
+              st.fields.reverseIterator.foreach(f => stack.push((f, childBuffer, emptyBuf())))
+            }
+          case at: ArrayType =>
+            if (childBuffer.nonEmpty) {
+              parentBuffer += StructField(field.name,
+                ArrayType(childBuffer.head.dataType), field.nullable)
+              stack.pop()
+            } else {
+              stack.push((StructField("", at.elementType, nullable = false),
+                childBuffer, emptyBuf()))
+            }
+          case mt: MapType =>
+            if (childBuffer.nonEmpty) {
+              parentBuffer += StructField(field.name,
+                MapType(childBuffer(0).dataType, childBuffer(1).dataType), field.nullable)
+              stack.pop()
+            } else {
+              stack.push((StructField("", mt.valueType, nullable = false),
+                childBuffer, emptyBuf()))
+              stack.push((StructField("", mt.keyType, nullable = false),
+                childBuffer, emptyBuf()))
+            }
+          case _ =>
+            if (dictColumns.contains(leafIndex)) {
+              parentBuffer += StructField(field.name, IntegerType, field.nullable)
+            } else {
+              parentBuffer += field
+            }
+            stack.pop()
+            leafIndex += 1
+        }
+      }
+      logDebug(s"[$taskID] DictLatMat: ${parquetColumn.sparkType} to ${rootBuffer.head.dataType}")
+      rootBuffer.head.dataType.asInstanceOf[StructType]
     }
   }
 
   private lazy val columnVectors: Array[ParquetColumnVector] =  {
     initialized.getAndSet(true)
 
-    hostColumnBuilders.indices.toArray.map { i =>
+    dataColumnBuilders.indices.toArray.map { i =>
       new ParquetColumnVector(parquetColumn.children(i),
-        hostColumnBuilders(i),
+        dataColumnBuilders(i),
         rowBatchSize min totalRowCnt,
-        Set.empty[ParquetColumn].asJava, true, -1, null);
+        Set.empty[ParquetColumn].asJava, true, -1, null,
+        if (hasDctLatMat == null) false else hasDctLatMat(i),
+      );
     }
   }
 
@@ -187,7 +332,9 @@ class AsyncParquetReader(
         currentGroup = rowGroupQueue.dequeue()
         remainPageRows = currentGroup.getRowCount.toInt
         // update column readers to read the new page
-        val stack = mutable.Stack[ParquetColumnVector](columnVectors: _*)
+        val stack = mutable.Stack[ParquetColumnVector]()
+        columnVectors.reverseIterator.foreach(stack.push)
+        var primitiveColIndex = 0
         while (stack.nonEmpty) {
           stack.pop() match {
             case cv if cv.getColumn.isPrimitive =>
@@ -202,9 +349,11 @@ class AsyncParquetReader(
                   TimeZone.getDefault.getID,
                   timestampRebaseMode.value,
                   TimeZone.getDefault.getID,
-                  writerVersion))
+                  writerVersion,
+                  dictColumns.contains(primitiveColIndex)))
+              primitiveColIndex += 1
             case cv =>
-              cv.getChildren.asScala.foreach(stack.push)
+              cv.getChildren.asScala.reverseIterator.foreach(stack.push)
           }
         }
       }
@@ -234,13 +383,29 @@ class AsyncParquetReader(
     // Finalize current batch and reset all buffers for the next batch
     // materialize current batch in the memory layout of cuDF column vector
     val sizeCounter: Array[Long] = Array.fill(1)(0L)
-    val result = hostColumnBuilders.map(_.build(sizeCounter))
+    val batchCols = dataColumnBuilders.map(_.build(sizeCounter))
     // update batch size and remaining
     remainBatchRows = rowBatchSize min remainTotalRows
     // Reset all the HostColumnBuffers for the upcoming batch
-    hostColumnBuilders.foreach(_.reallocate(remainBatchRows))
+    dataColumnBuilders.foreach(_.reallocate(remainBatchRows))
 
-    AsyncBatchResult(result, sizeCounter.head)
+    // Only return DictionaryInfo on the first batch since it works as global context
+    val dictInfo = if (globalRowOffset > 0 || dictColumns.isEmpty) {
+      None
+    } else {
+      val (colIdx, dictData) = dictColumns.unzip
+      val (dictVec, dictSliceOffsets) = dictData.unzip
+      logDebug(s"[$taskID] column index: $colIdx -> " +
+        s"dictSlices: [${dictSliceOffsets.map(_.mkString(",")).mkString(" | ")}]")
+      Some(HostDictionaryInfo(
+        colIdx.toArray, dictVec.toArray, dictSliceOffsets.toArray,
+        parquetLeafOffsets, rowGroupRowOffsets))
+    }
+
+    val batchRowSize = batchCols.head.getRowCount.toInt
+    val batchRowOffset = globalRowOffset
+    globalRowOffset += batchRowSize
+    AsyncBatchResult(batchCols, dictInfo, batchRowOffset, batchRowSize, sizeCounter.head)
   }
 
   private def readAsProducer(): Unit = {
@@ -268,7 +433,7 @@ class AsyncParquetReader(
         batchResult match {
           case Left(_) =>
             numProduced = producedBatches.incrementAndGet()
-            logError(s"[$taskID] produced a new batch($numProduced/$numBatches)")
+            logDebug(s"[$taskID] produced a new batch($numProduced/$numBatches)")
           case Right(exception) =>
             throw exception
         }
@@ -305,7 +470,7 @@ class AsyncParquetReader(
       batchResult match {
         case Left(columnBatch) =>
           val numConsumed = consumedBatches.incrementAndGet()
-          logError(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
+          logDebug(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
           columnBatch
         case Right(ex) =>
           throw new AsyncParquetReaderError(ex)
@@ -364,13 +529,116 @@ object AsyncParquetReader {
             clippedSchema: MessageType,
             readDataSchema: StructType,
             slotAcquired: Boolean,
+            enableDictLateMat: Boolean,
             asynchronous: Boolean): AsyncParquetReader = {
     new AsyncParquetReader(conf,
       tgtBatchSize, fileBuffer, offset, len,
       metrics,
       dateRebaseMode, timestampRebaseMode,
       clippedSchema,
-      slotAcquired, asynchronous)
+      slotAcquired, enableDictLateMat, asynchronous)
+  }
+
+  def decodeDictionary(columns: Array[ColumnVector],
+                       rowStart: Int,
+                       rowEnd: Int,
+                       dictInfo: DeviceDictionaryInfo): Array[ColumnVector] = {
+
+    // 1. compute the slice index range of current batch
+    // 2. compute the row size of each range partition if the range crossing multiple RowGroups
+    val (sliceStart, sliceEnd, slicePartSizes) = {
+      val rgOff: Array[Int] = dictInfo.rowGroupOffsets
+      var start = -1
+      var end = 0
+      while (rgOff(end + 1) < rowEnd) {
+        if (start < 0 && rgOff(end + 1) > rowStart) {
+          start = end
+        }
+        end += 1
+      }
+      if (start < 0) start = end
+
+      val partSizes = mutable.ArrayBuffer[Int]()
+      if (start < end) {
+        partSizes += rgOff(start + 1) - rowStart
+        ((start + 1) until end).foreach { i =>
+          partSizes += rgOff(i + 1) - rgOff(i)
+        }
+        partSizes += rowEnd - rgOff(end)
+      }
+
+      (start, end, partSizes.toArray)
+    }
+
+    val leafOffsets: Array[Int] = dictInfo.leafColumnOffsets
+    val dictSliceInfo: Array[Array[Int]] = dictInfo.dictSliceOffsets
+    var fieldIdx: Int = 0
+    var dictVecIdx: Int = 0
+    dictInfo.columnIndices.zip(dictInfo.vectors).foreach { case (leafIdx, dictVector) =>
+      closeOnExcept(dictVector) { _ =>
+        while (fieldIdx < columns.length && leafIdx >= leafOffsets(fieldIdx + 1)) {
+          fieldIdx += 1
+        }
+        if (fieldIdx == columns.length || leafOffsets(fieldIdx) != leafIdx) {
+          throw new UnsupportedOperationException(
+            "Currently only supports dictionary decoding for non-nested string columns")
+        }
+      }
+
+      // replace null indices with OUT_OF_BOUND value
+      val dictSize = dictVector.getRowCount.toInt
+      val localIndexVec = withResource(columns(fieldIdx)) { col =>
+        if (!col.hasNulls) {
+          col.incRefCount()
+        } else {
+          withResource(Scalar.fromInt(dictSize)) { oobVal =>
+            col.replaceNulls(oobVal)
+          }
+        }
+      }
+
+      /* // check correctness is DictIndices
+      val slice = dictSliceInfo(dictVecIdx)
+      val ubVal = (0 until slice.length - 1).map(i => slice(i + 1) - slice(i)).max
+      withResource(localIndexVec.max()) { idxMax =>
+        require(idxMax.getInt <= ubVal, s"index ${idxMax.getInt} out of bound $ubVal")
+      } */
+
+      // convert the local indexVector to the global indexVector (across multiple DictPages)
+      val indexVector = withResource(localIndexVec) { col =>
+        if (sliceStart == sliceEnd) {
+          // set the same offset since current batch does not cross RowGroups
+          withResource(Scalar.fromInt(dictSliceInfo(dictVecIdx)(sliceEnd))) { s =>
+            col.add(s)
+          }
+        } else {
+          //
+          val partCVs = withResource(mutable.ArrayBuffer[Scalar]()) { scalars =>
+            (sliceStart to sliceEnd).foreach { i =>
+              scalars += Scalar.fromInt(dictSliceInfo(dictVecIdx)(i))
+            }
+            scalars.zip(slicePartSizes).safeMap { case (s, partLen) =>
+              ColumnVector.fromScalar(s, partLen)
+            }
+          }
+          val offsetVec = withResource(partCVs) { _ =>
+            ColumnVector.concatenate(partCVs: _*)
+          }
+          withResource(offsetVec) { _ =>
+            col.add(offsetVec)
+          }
+        }
+      }
+      dictVecIdx += 1
+
+      // Decode the BinaryDictionary with indexVector and replace the original column
+      columns(fieldIdx) = withResource(indexVector) { _ =>
+        withResource(new Table(dictVector)) { dictTable =>
+          dictTable.gather(indexVector).getColumn(0)
+        }
+      }
+    }
+    columns
   }
 }
 
@@ -419,20 +687,23 @@ object HostParquetIterator extends Logging {
       hybridOpts: HybridParquetOpts,
       metrics: Map[String, GpuMetric]) extends AutoCloseable with Logging {
 
-    private val enablePreload = hybridOpts.maxPreloadBytes > 0
+    private var dictionaryInfo: Option[DeviceDictionaryInfo] = None
+    private var hostDctVecHolder: Array[HostColumnVector] = Array.ofDim(0)
 
     def execute(batchResult: AsyncBatchResult): ColumnarBatch = {
-      val batchMemSize = batchResult.sizeInByte
 
-      val preloaded = if (!enablePreload || !tryAcquirePreloadH2DSlots(batchMemSize)) {
-        withResource(new NvtxWithMetrics(
-          "GPU wait time before H2D", NvtxColor.WHITE, metrics("preH2dGpuWait"))) { _ =>
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-        }
-        false
-      } else {
-        metrics("preloadH2DBatches") += 1
-        true
+      withResource(new NvtxWithMetrics(
+        "GPU wait time before H2D", NvtxColor.WHITE, metrics("preH2dGpuWait"))) { _ =>
+        GpuSemaphore.acquireIfNecessary(TaskContext.get())
+      }
+
+      if (dictionaryInfo.isEmpty && batchResult.dictInfo.nonEmpty) {
+        val hInfo = batchResult.dictInfo.get
+        hostDctVecHolder = hInfo.vectors
+        val deviceDictVectors = hostDctVecHolder.safeMap(_.copyToDevice())
+        dictionaryInfo = Some(DeviceDictionaryInfo(
+          hInfo.columnIndices, deviceDictVectors, hInfo.dictSliceOffsets,
+          hInfo.leafColumnOffsets, hInfo.rowGroupOffsets))
       }
 
       val ret = withResource(new NvtxWithMetrics("Transfer HostVectors to Device", NvtxColor.CYAN,
@@ -442,46 +713,41 @@ object HostParquetIterator extends Logging {
         // AsyncBatchResult::close)
         val deviceCVs = batchResult.data.safeMap(_.copyToDevice())
 
-        val batchRows = batchResult.data.head.getRowCount
-        metrics.get("cpuDecodeRows").foreach(_.+=(batchRows))
+        metrics.get("cpuDecodeRows").foreach(_.+=(batchResult.sizeInRow))
         metrics.get("cpuDecodeBatches").foreach(_.+=(1))
         metrics.get("numOutputBatches").foreach(_.+=(1))
 
-        withResource(deviceCVs) { dCVs =>
-          withResource(new Table(dCVs: _*)) { table =>
-            GpuColumnVector.from(table, dataTypes)
+        val dCVs = if (dictionaryInfo.isEmpty) {
+          deviceCVs
+        } else {
+          closeOnExcept(deviceCVs) { _ =>
+            AsyncParquetReader.decodeDictionary(
+              deviceCVs,
+              batchResult.globalRowOffset,
+              batchResult.globalRowOffset + batchResult.sizeInRow,
+              dictionaryInfo.get)
           }
         }
-      }
-
-      if (preloaded) {
-        withResource(new NvtxWithMetrics(
-          "GPU wait time after H2D", NvtxColor.WHITE, metrics("postH2dGpuWait"))) { _ =>
-          GpuSemaphore.acquireIfNecessary(TaskContext.get())
-          preloadMemPool.getAndAdd(batchMemSize)
+        withResource(new Table(dCVs: _*)) { table =>
+          dCVs.safeClose()
+          GpuColumnVector.from(table, dataTypes)
         }
       }
 
       ret
     }
 
-    private def tryAcquirePreloadH2DSlots(batchMemSize: Long): Boolean = {
-      if (preloadMemPool.addAndGet(-batchMemSize) < 0) {
-        preloadMemPool.getAndAdd(batchMemSize)
-        false
-      } else {
-        true
-      }
+    override def close(): Unit = {
+      dictionaryInfo.foreach(_.vectors.safeClose())
+      hostDctVecHolder.safeClose()
     }
-
-    override def close(): Unit = {}
   }
 
   def parseHybridParquetOpts(str: String): HybridParquetOpts = {
     implicit val formats: Formats = DefaultFormats
     val defaultJson = parse(
       """{"mode": "GPU_ONLY", "maxConcurrent": 0, "batchSizeBytes": 0, "async": true,
-        |"pollInterval": 0, "maxPreloadBytes": 0}""".stripMargin)
+        |"pollInterval": 0, "enableDictLateMat": false}""".stripMargin)
 
     val json: JValue = if (str.isEmpty) {
       defaultJson
@@ -526,25 +792,18 @@ object HostParquetIterator extends Logging {
       if (!initialized.get()) {
         syncSemaphore = new Semaphore(opts.maxConcurrent)
         ComputeThreadPool.launch(opts.maxConcurrent, 1024)
-        preloadMemPool = new AtomicLong(opts.maxPreloadBytes)
         initialized.set(true)
       }
     }
   }
 
-  private var preloadMemPool: AtomicLong = _
   private var syncSemaphore: Semaphore = _
   private val initialized: AtomicBoolean = new AtomicBoolean(false)
 }
-
-// sealed trait ReadMode
-// object HostOnly extends ReadMode
-// object DeviceOnly extends ReadMode
-// object DeviceFirst extends ReadMode
 
 case class HybridParquetOpts(mode: String,
                              maxConcurrent: Int,
                              batchSizeBytes: Long,
                              pollInterval: Int,
-                             maxPreloadBytes: Long,
+                             enableDictLateMat: Boolean,
                              async: Boolean)

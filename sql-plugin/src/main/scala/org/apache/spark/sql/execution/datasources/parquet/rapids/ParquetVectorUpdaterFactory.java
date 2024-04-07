@@ -1,12 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * Copyright (c) 2024, NVIDIA CORPORATION.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,11 +27,12 @@ import org.apache.spark.sql.catalyst.util.RebaseDateTime;
 import org.apache.spark.sql.execution.datasources.DataSourceUtils;
 import org.apache.spark.sql.execution.datasources.SchemaColumnConvertNotSupportedException;
 import org.apache.spark.sql.execution.datasources.parquet.ParquetRowConverter;
+import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector;
+import org.apache.spark.sql.execution.vectorized.rapids.ParquetHelperVector;
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
 import org.apache.spark.sql.types.*;
 
 import java.math.BigInteger;
-import java.nio.ByteBuffer;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
@@ -170,7 +170,7 @@ public class ParquetVectorUpdaterFactory {
 				break;
 			case BINARY:
 				if (sparkType == DataTypes.StringType) {
-					return new BinaryFastDecodeDictUpdater();
+					return new ZerocopyStringUpdater();
 				}
 				if (sparkType == DataTypes.BinaryType || canReadAsBinaryDecimal(descriptor, sparkType)) {
 					return new BinaryUpdater();
@@ -232,7 +232,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BooleanUpdater implements ParquetVectorUpdater {
+	private static class BooleanUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -265,7 +265,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	static class IntegerUpdater implements ParquetVectorUpdater {
+	static class IntegerUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -298,7 +298,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class UnsignedIntegerUpdater implements ParquetVectorUpdater {
+	private static class UnsignedIntegerUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -332,7 +332,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class ByteUpdater implements ParquetVectorUpdater {
+	private static class ByteUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -365,7 +365,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class ShortUpdater implements ParquetVectorUpdater {
+	private static class ShortUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -398,7 +398,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class IntegerWithRebaseUpdater implements ParquetVectorUpdater {
+	private static class IntegerWithRebaseUpdater extends ParquetVectorUpdater {
 		private final boolean failIfRebase;
 
 		IntegerWithRebaseUpdater(boolean failIfRebase) {
@@ -439,7 +439,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class LongUpdater implements ParquetVectorUpdater {
+	private static class LongUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -472,7 +472,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class DowncastLongUpdater implements ParquetVectorUpdater {
+	private static class DowncastLongUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -507,7 +507,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class UnsignedLongUpdater implements ParquetVectorUpdater {
+	private static class UnsignedLongUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -543,7 +543,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class LongWithRebaseUpdater implements ParquetVectorUpdater {
+	private static class LongWithRebaseUpdater extends ParquetVectorUpdater {
 		private final boolean failIfRebase;
 		private final String timeZone;
 
@@ -586,7 +586,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class LongAsMicrosUpdater implements ParquetVectorUpdater {
+	private static class LongAsMicrosUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -622,7 +622,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class LongAsMicrosRebaseUpdater implements ParquetVectorUpdater {
+	private static class LongAsMicrosRebaseUpdater extends ParquetVectorUpdater {
 		private final boolean failIfRebase;
 		private final String timeZone;
 
@@ -668,7 +668,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class FloatUpdater implements ParquetVectorUpdater {
+	private static class FloatUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -701,7 +701,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class DoubleUpdater implements ParquetVectorUpdater {
+	private static class DoubleUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -734,7 +734,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BinaryUpdater implements ParquetVectorUpdater {
+	private static class BinaryUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -768,7 +768,8 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BinaryFastDecodeDictUpdater implements ParquetVectorUpdater {
+	private static class ZerocopyStringUpdater extends ParquetVectorUpdater {
+
 		@Override
 		public void readValues(
 				int total,
@@ -797,14 +798,35 @@ public class ParquetVectorUpdaterFactory {
 				WritableColumnVector values,
 				WritableColumnVector dictionaryIds,
 				Dictionary dictionary) {
-			Binary v = dictionary.decodeToBinary(dictionaryIds.getDictId(offset));
-			ByteBuffer bb = v.toByteBuffer();
-			int start = bb.position() + bb.arrayOffset();
-			values.putByteArray(offset, bb.array(), start, bb.limit() - start);
+			HostWritableColumnVector cv = (HostWritableColumnVector) values;
+			OffHeapBinaryDictionary offHeapDict = (OffHeapBinaryDictionary) dictionary;
+			int[] dctOff = offHeapDict.getOffsets();
+			int id = dictionaryIds.getDictId(offset);
+			cv.putBytesUnsafely(offset, offHeapDict.getData(), dctOff[id], dctOff[id + 1] - dctOff[id]);
+		}
+
+		@Override
+		public void decodeDictionaryIds(
+				int total,
+				int offset,
+				WritableColumnVector values,
+				WritableColumnVector dictionaryIds,
+				Dictionary dictionary) {
+			super.decodeDictionaryIds(total, offset, values, dictionaryIds, dictionary);
+			/*
+			HostWritableColumnVector cv = (HostWritableColumnVector) values;
+			OffHeapBinaryDictionary offHeapDict = (OffHeapBinaryDictionary) dictionary;
+
+			cv.decodeBinaryDictAndAppendData(
+					total, offset,
+					offHeapDict.getOffsets(),
+					offHeapDict.getData(),
+					((ParquetHelperVector) dictionaryIds).getRawBuffer());
+			 */
 		}
 	}
 
-	private static class BinaryToSQLTimestampUpdater implements ParquetVectorUpdater {
+	private static class BinaryToSQLTimestampUpdater extends ParquetVectorUpdater {
 		@Override
 		public void readValues(
 				int total,
@@ -842,7 +864,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BinaryToSQLTimestampConvertTzUpdater implements ParquetVectorUpdater {
+	private static class BinaryToSQLTimestampConvertTzUpdater extends ParquetVectorUpdater {
 		private final ZoneId convertTz;
 
 		BinaryToSQLTimestampConvertTzUpdater(ZoneId convertTz) {
@@ -889,7 +911,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BinaryToSQLTimestampRebaseUpdater implements ParquetVectorUpdater {
+	private static class BinaryToSQLTimestampRebaseUpdater extends ParquetVectorUpdater {
 		private final boolean failIfRebase;
 		private final String timeZone;
 
@@ -938,7 +960,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class BinaryToSQLTimestampConvertTzRebaseUpdater implements ParquetVectorUpdater {
+	private static class BinaryToSQLTimestampConvertTzRebaseUpdater extends ParquetVectorUpdater {
 		private final boolean failIfRebase;
 		private final ZoneId convertTz;
 		private final String timeZone;
@@ -994,7 +1016,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class FixedLenByteArrayUpdater implements ParquetVectorUpdater {
+	private static class FixedLenByteArrayUpdater extends ParquetVectorUpdater {
 		private final int arrayLen;
 
 		FixedLenByteArrayUpdater(int arrayLen) {
@@ -1036,7 +1058,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class FixedLenByteArrayAsIntUpdater implements ParquetVectorUpdater {
+	private static class FixedLenByteArrayAsIntUpdater extends ParquetVectorUpdater {
 		private final int arrayLen;
 
 		FixedLenByteArrayAsIntUpdater(int arrayLen) {
@@ -1079,7 +1101,7 @@ public class ParquetVectorUpdaterFactory {
 		}
 	}
 
-	private static class FixedLenByteArrayAsLongUpdater implements ParquetVectorUpdater {
+	private static class FixedLenByteArrayAsLongUpdater extends ParquetVectorUpdater {
 		private final int arrayLen;
 
 		FixedLenByteArrayAsLongUpdater(int arrayLen) {

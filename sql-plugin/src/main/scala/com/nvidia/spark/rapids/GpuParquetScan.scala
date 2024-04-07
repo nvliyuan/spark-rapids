@@ -2610,7 +2610,7 @@ class MultiFileCloudParquetPartitionReader(
         hostBuffer, 0, dataSize, metrics,
         dateRebaseMode, timestampRebaseMode, hasInt96Timestamps,
         clippedSchema, readDataSchema,
-        slotAcquired, hybridOpts.async)
+        slotAcquired, hybridOpts.enableDictLateMat, hybridOpts.async)
 
       val batchIter = HostParquetIterator(asyncReader, hybridOpts, colTypes, metrics)
 

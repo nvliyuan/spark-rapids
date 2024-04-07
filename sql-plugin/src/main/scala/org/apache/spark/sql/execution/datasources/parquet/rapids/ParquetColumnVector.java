@@ -57,9 +57,11 @@ final class ParquetColumnVector {
 			Set<ParquetColumn> missingColumns,
 			boolean isTopLevel,
 			int maxRepetitiveDefLevel,
-			Object defaultValue) {
+			Object defaultValue,
+			boolean dictLateMaterialize) {
+
 		DataType sparkType = column.sparkType();
-		if (!sparkType.sameType(vector.dataType())) {
+		if (!dictLateMaterialize && !sparkType.sameType(vector.dataType())) {
 			throw new IllegalArgumentException("Spark type: " + sparkType +
 					" doesn't match the type: " + vector.dataType() + " in column vector");
 		}
@@ -119,7 +121,8 @@ final class ParquetColumnVector {
 			for (int i = 0; i < column.children().size(); i++) {
 				ParquetColumnVector childCv = new ParquetColumnVector(column.children().apply(i),
 						vector.getChild(i), capacity, missingColumns, false,
-						childMaxRepetitiveDefLevel, null);
+						childMaxRepetitiveDefLevel, null,
+						false);
 				children.add(childCv);
 
 
@@ -250,6 +253,9 @@ final class ParquetColumnVector {
 	void setColumnReader(VectorizedColumnReader reader) {
 		if (!isPrimitive) {
 			throw new IllegalStateException("Can't set reader for non-primitive column");
+		}
+		if (this.columnReader != null) {
+			this.columnReader.close();
 		}
 		this.columnReader = reader;
 	}

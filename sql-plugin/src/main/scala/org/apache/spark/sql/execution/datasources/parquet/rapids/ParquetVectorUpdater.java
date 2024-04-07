@@ -1,12 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements.  See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * Copyright (c) 2024, NVIDIA CORPORATION.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,9 +18,10 @@ package org.apache.spark.sql.execution.datasources.parquet.rapids;
 
 import org.apache.parquet.column.Dictionary;
 
+import org.apache.spark.sql.execution.vectorized.rapids.HostWritableColumnVector;
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
 
-public interface ParquetVectorUpdater {
+public abstract class ParquetVectorUpdater {
 	/**
 	 * Read a batch of `total` values from `valuesReader` into `values`, starting from `offset`.
 	 *
@@ -30,7 +30,7 @@ public interface ParquetVectorUpdater {
 	 * @param values destination values vector
 	 * @param valuesReader reader to read values from
 	 */
-	void readValues(
+	abstract void readValues(
 			int total,
 			int offset,
 			WritableColumnVector values,
@@ -42,7 +42,7 @@ public interface ParquetVectorUpdater {
 	 * @param total total number of values to skip
 	 * @param valuesReader reader to skip values from
 	 */
-	void skipValues(int total, VectorizedValuesReader valuesReader);
+	abstract void skipValues(int total, VectorizedValuesReader valuesReader);
 
 	/**
 	 * Read a single value from `valuesReader` into `values`, at `offset`.
@@ -51,7 +51,7 @@ public interface ParquetVectorUpdater {
 	 * @param values destination value vector
 	 * @param valuesReader reader to read values from
 	 */
-	void readValue(int offset, WritableColumnVector values, VectorizedValuesReader valuesReader);
+	abstract void readValue(int offset, WritableColumnVector values, VectorizedValuesReader valuesReader);
 
 	/**
 	 * Process a batch of `total` values starting from `offset` in `values`, whose null slots
@@ -64,15 +64,24 @@ public interface ParquetVectorUpdater {
 	 * @param dictionaryIds vector storing the dictionary IDs
 	 * @param dictionary Parquet dictionary used to decode a dictionary ID to its value
 	 */
-	default void decodeDictionaryIds(
+	public void decodeDictionaryIds(
 			int total,
 			int offset,
 			WritableColumnVector values,
 			WritableColumnVector dictionaryIds,
 			Dictionary dictionary) {
+
+		HostWritableColumnVector cv = (HostWritableColumnVector) values;
+
+		if (!cv.hasNullMask()) {
+			for (int i = offset; i < offset + total; i++) {
+				decodeSingleDictionaryId(i, cv, dictionaryIds, dictionary);
+			}
+			return;
+		}
 		for (int i = offset; i < offset + total; i++) {
-			if (!values.isNullAt(i)) {
-				decodeSingleDictionaryId(i, values, dictionaryIds, dictionary);
+			if (!cv.isNullAt(i)) {
+				decodeSingleDictionaryId(i, cv, dictionaryIds, dictionary);
 			}
 		}
 	}
@@ -86,7 +95,7 @@ public interface ParquetVectorUpdater {
 	 * @param dictionaryIds vector storing the dictionary IDs
 	 * @param dictionary Parquet dictionary used to decode a dictionary ID to its value
 	 */
-	void decodeSingleDictionaryId(
+	abstract void decodeSingleDictionaryId(
 			int offset,
 			WritableColumnVector values,
 			WritableColumnVector dictionaryIds,

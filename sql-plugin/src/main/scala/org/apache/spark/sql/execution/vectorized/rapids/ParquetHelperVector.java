@@ -73,6 +73,10 @@ public class ParquetHelperVector extends WritableColumnVector {
 		return HostMemoryBuffer.allocate(size);
 	}
 
+	public HostMemoryBuffer getRawBuffer() {
+		return data;
+	}
+
 	@Override
 	public int getDictId(int rowId) {
 		return data.getInt(rowId * 4L);

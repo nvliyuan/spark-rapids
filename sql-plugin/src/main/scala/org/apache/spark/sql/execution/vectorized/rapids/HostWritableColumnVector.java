@@ -20,7 +20,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
-import java.util.Random;
 
 import ai.rapids.cudf.*;
 import com.nvidia.spark.rapids.GpuColumnVector;
@@ -198,6 +197,10 @@ public class HostWritableColumnVector extends WritableColumnVector {
 				((HostWritableColumnVector) ch).reallocate(newCapacity);
 			}
 		}
+	}
+
+	public boolean hasNullMask() {
+		return valids != null;
 	}
 
 	@Override
@@ -475,6 +478,124 @@ public class HostWritableColumnVector extends WritableColumnVector {
 		lastCharRowId = rowId;
 
 		return result;
+	}
+
+	public void putBytesUnsafely(int rowId, HostMemoryBuffer buffer, int offset, int length) {
+		rowGroupIndex++;
+		rowId += rowGroupOffset;
+
+		HostWritableColumnVector chars = (HostWritableColumnVector) childColumns[0];
+		int globalOffset = chars.elementsAppended + rowGroupStringOffset;
+
+		chars.reserve(chars.elementsAppended + length);
+		int charsDstOffset = chars.elementsAppended + chars.rowGroupOffset;
+
+		if (length < 8) {
+			for (int i = offset; i < offset + length; i++) {
+				chars.data.setByte(charsDstOffset++, buffer.getByte(i));
+			}
+		}/* else if (length <= 64) {
+			int position = offset;
+			for (; position < (offset + length) >> 3 << 3; position += 8) {
+				chars.data.setLong(charsDstOffset, buffer.getLong(position));
+				charsDstOffset += 8;
+			}
+			for (; position < offset + length; position++) {
+				chars.data.setByte(charsDstOffset++, buffer.getByte(position));
+			}
+		}*/ else {
+			chars.data.copyFromHostBuffer(charsDstOffset, buffer, offset, length);
+		}
+
+		chars.rowGroupIndex += length;
+		chars.elementsAppended += length;
+
+		for (int i = lastCharRowId + 1; i < rowId; ++i) {
+			charOffsets.setInt((i + 1) * 4L, globalOffset);
+		}
+		charOffsets.setInt((rowId + 1) * 4L, globalOffset + length);
+		lastCharRowId = rowId;
+	}
+
+	public void decodeBinaryDictAndAppendData(int numRows,
+																						int rowOffset,
+																						int[] dictOffsets,
+																						HostMemoryBuffer dictData,
+																						HostMemoryBuffer dictIndices) {
+
+		HostWritableColumnVector chars = (HostWritableColumnVector) childColumns[0];
+		int globalStringOffset = chars.elementsAppended + rowGroupStringOffset;
+		int globalRowOffset = rowOffset + rowGroupOffset;
+
+		for (int i = lastCharRowId + 1; i < globalRowOffset; ++i) {
+			charOffsets.setInt((i + 1) * 4L, globalStringOffset);
+		}
+
+		/*
+		  Decode absolute positions to the Dictionary from DictionaryIndices. Meanwhile, accumulate charOffsets.
+		 */
+		int[] decodedOffsets = new int[numRows];
+		int[] decodedLengths = new int[numRows];
+		int charCount = 0;
+
+		if (valids == null) {
+			for (int i = 0; i < numRows; i++) {
+				int id = dictIndices.getInt((rowOffset + i) * 4L);
+				decodedOffsets[i] = dictOffsets[id];
+				decodedLengths[i] = dictOffsets[id + 1] - dictOffsets[id];
+				charCount += decodedLengths[i];
+				charOffsets.setInt((globalRowOffset + i + 1) * 4L, globalStringOffset + charCount);
+			}
+		} else {
+			for (int i = 0; i < numRows; i++) {
+				if (valids.getByte(globalRowOffset + i) == 1) {
+					charOffsets.setInt((globalRowOffset + i + 1) * 4L, globalStringOffset + charCount);
+					continue;
+				}
+				int id = dictIndices.getInt((rowOffset + i) * 4L);
+				decodedOffsets[i] = dictOffsets[id];
+				decodedLengths[i] = dictOffsets[id + 1] - dictOffsets[id];
+				charCount += decodedLengths[i];
+				charOffsets.setInt((globalRowOffset + i + 1) * 4L, globalStringOffset + charCount);
+			}
+		}
+
+		rowGroupIndex += numRows;
+		lastCharRowId = rowOffset + numRows - 1;
+
+		/*
+			Gather char data to HostColumnVector builder
+	 	 */
+		chars.reserve(chars.elementsAppended + charCount);
+		int charsDstOffset = chars.elementsAppended + chars.rowGroupOffset;
+
+		for (int i = 0; i < numRows; i++) {
+			if (decodedLengths[i] == 0) {
+				continue;
+			}
+			int curOffset = decodedOffsets[i];
+			int curLength = decodedLengths[i];
+			if (curLength < 8) {
+				for (int j = curOffset; j < curOffset + curLength; j++) {
+					chars.data.setByte(charsDstOffset++, dictData.getByte(j));
+				}
+			}/* else if (curLength <= 64) {
+				int position = curOffset;
+				for (; position < (curOffset + curLength) >> 3 << 3; position += 8) {
+					chars.data.setLong(charsDstOffset, dictData.getLong(position));
+					charsDstOffset += 8;
+				}
+				for (; position < curOffset + curLength; position++) {
+					chars.data.setByte(charsDstOffset++, dictData.getByte(position));
+				}
+			}*/ else {
+				chars.data.copyFromHostBuffer(charsDstOffset, dictData, curOffset, curLength);
+				charsDstOffset += curLength;
+			}
+		}
+
+		chars.rowGroupIndex += charCount;
+		chars.elementsAppended += charCount;
 	}
 
 	public void commitStringAppend(int rowId, int prevOffset, int curLength) {
