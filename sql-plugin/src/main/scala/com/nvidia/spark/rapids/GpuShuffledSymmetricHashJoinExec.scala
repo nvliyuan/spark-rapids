@@ -820,11 +820,11 @@ abstract class JoinPartitioner(
     val spillableBatch = SpillableColumnarBatch(inputBatch, SpillPriorities.ACTIVE_ON_DECK_PRIORITY)
     withRetryNoSplit(spillableBatch) { _ =>
       opTime.ns {
-        val partsTable = GpuHashPartitioningBase.hashPartitionAndClose(
-          spillableBatch.getColumnarBatch(), boundJoinKeys, numPartitions, "partition for join",
-          JoinPartitioner.HASH_SEED)
-        val contigTables = withResource(partsTable) { _ =>
-          partsTable.getTable.contiguousSplit(partsTable.getPartitions.tail: _*)
+        val (pt, parts) = GpuHashPartitioningBase.hashPartitionAndClose(
+          spillableBatch.getColumnarBatch(), boundJoinKeys, numPartitions, false,
+          "partition for join", JoinPartitioner.HASH_SEED)
+        val contigTables = withResource(pt) { _ =>
+          pt.contiguousSplit(parts.tail: _*)
         }
         withResource(contigTables) { _ =>
           contigTables.zipWithIndex.foreach { case (ct, i) =>

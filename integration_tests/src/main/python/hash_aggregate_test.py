@@ -634,18 +634,21 @@ def test_min_max_group_by(data_gen):
 @ignore_order(local=True, arrays=["blist"])
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_list_op, ids=idfn)
 @pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
-def test_hash_groupby_collect_list(data_gen, use_obj_hash_agg):
+@pytest.mark.parametrize('padding_partition', [True, False], ids=idfn)
+def test_hash_groupby_collect_list(data_gen, use_obj_hash_agg, padding_partition):
     def doit(spark):
         return gen_df(spark, data_gen, length=100)\
             .groupby('a')\
             .agg(f.collect_list('b').alias("blist"))
     assert_gpu_and_cpu_are_equal_collect(
         doit,
-        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower(),
+              'spark.rapids.shuffle.paddingPartition.enabled': padding_partition})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('use_obj_hash_agg', [True, False], ids=idfn)
-def test_hash_groupby_collect_list_of_maps(use_obj_hash_agg):
+@pytest.mark.parametrize('padding_partition', [True, False], ids=idfn)
+def test_hash_groupby_collect_list_of_maps(use_obj_hash_agg, padding_partition):
     gens = [("a", RepeatSeqGen(LongGen(), length=20)), ("b", simple_string_to_string_map_gen)]
     def doit(spark):
         df = gen_df(spark, gens, length=100) \
@@ -657,25 +660,30 @@ def test_hash_groupby_collect_list_of_maps(use_obj_hash_agg):
         return spark.createDataFrame(df.rdd, schema=df.schema).select("a", f.explode("blist"))
     assert_gpu_and_cpu_are_equal_collect(
         doit,
-        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower()})
+        conf={'spark.sql.execution.useObjectHashAggregateExec': str(use_obj_hash_agg).lower(),
+              'spark.rapids.shuffle.paddingPartition.enabled': padding_partition})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', _full_gen_data_for_collect_op, ids=idfn)
+@pytest.mark.parametrize('padding_partition', [True, False], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_groupby_collect_set(data_gen):
+def test_hash_groupby_collect_set(data_gen, padding_partition):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
             .groupby('a')
-            .agg(f.sort_array(f.collect_set('b')), f.count('b')))
+            .agg(f.sort_array(f.collect_set('b')), f.count('b')),
+        conf={'spark.rapids.shuffle.paddingPartition.enabled': padding_partition})
 
 @ignore_order(local=True)
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_set_op, ids=idfn)
+@pytest.mark.parametrize('padding_partition', [True, False], ids=idfn)
 @allow_non_gpu(*non_utc_allow)
-def test_hash_groupby_collect_set_on_nested_type(data_gen):
+def test_hash_groupby_collect_set_on_nested_type(data_gen, padding_partition):
     assert_gpu_and_cpu_are_equal_collect(
         lambda spark: gen_df(spark, data_gen, length=100)
             .groupby('a')
-            .agg(f.sort_array(f.collect_set('b'))))
+            .agg(f.sort_array(f.collect_set('b'))),
+        conf={'spark.rapids.shuffle.paddingPartition.enabled': padding_partition})
 
 
 # NOTE: sorting the arrays locally, because sort_array() does not yet
@@ -685,9 +693,11 @@ def test_hash_groupby_collect_set_on_nested_type(data_gen):
 @ignore_order(local=True, arrays=["collect_set"])
 @allow_non_gpu("ProjectExec", *non_utc_allow)
 @pytest.mark.parametrize('data_gen', _gen_data_for_collect_set_op_nested, ids=idfn)
-def test_hash_groupby_collect_set_on_nested_array_type(data_gen):
+@pytest.mark.parametrize('padding_partition', [True, False], ids=idfn)
+def test_hash_groupby_collect_set_on_nested_array_type(data_gen, padding_partition):
     conf = copy_and_update(_float_conf, {
         "spark.rapids.sql.castFloatToString.enabled": "true",
+        'spark.rapids.shuffle.paddingPartition.enabled': padding_partition
     })
 
     def do_it(spark):

@@ -51,6 +51,9 @@ trait GpuPartitioning extends Partitioning {
 
   def usesMultiThreadedShuffle: Boolean = _useMultiThreadedShuffle
 
+
+  def usePaddingPartition: Boolean = false
+
   def sliceBatch(vectors: Array[RapidsHostColumnVector], start: Int, end: Int): ColumnarBatch = {
     var ret: ColumnarBatch = null
     val count = end - start
@@ -119,7 +122,8 @@ trait GpuPartitioning extends Partitioning {
   }
 
   def sliceInternalOnCpuAndClose(numRows: Int, partitionIndexes: Array[Int],
-      partitionColumns: Array[GpuColumnVector]): Array[(ColumnarBatch, Int)] = {
+      partitionColumns: Array[GpuColumnVector],
+      paddingPartition: Boolean = false): Array[(ColumnarBatch, Int)] = {
     // We need to make sure that we have a null count calculated ahead of time.
     // This should be a temp work around.
     partitionColumns.foreach(_.getBase.getNullCount)
@@ -135,14 +139,23 @@ trait GpuPartitioning extends Partitioning {
       // Leaving the GPU for a while
       GpuSemaphore.releaseIfNecessary(TaskContext.get())
 
-      val origParts = new Array[ColumnarBatch](numPartitions)
-      var start = 0
-      for (i <- 1 until Math.min(numPartitions, partitionIndexes.length)) {
-        val idx = partitionIndexes(i)
-        origParts(i - 1) = sliceBatch(hostPartColumns, start, idx)
-        start = idx
-      }
-      origParts(numPartitions - 1) = sliceBatch(hostPartColumns, start, numRows)
+      val origParts: Array[ColumnarBatch] =
+        if (!paddingPartition) {
+          val parts = new Array[ColumnarBatch](numPartitions)
+          var start = 0
+          for (i <- 1 until Math.min(numPartitions, partitionIndexes.length)) {
+            val idx = partitionIndexes(i)
+            parts(i - 1) = sliceBatch(hostPartColumns, start, idx)
+            start = idx
+          }
+          parts(numPartitions - 1) = sliceBatch(hostPartColumns, start, numRows)
+          parts
+        } else {
+          (partitionIndexes.indices by 2).map { i =>
+            sliceBatch(hostPartColumns, partitionIndexes(i), partitionIndexes(i + 1))
+          }.toArray
+        }
+
       val tmp = origParts.zipWithIndex.filter(_._1 != null)
       // Spark CPU shuffle in some cases has limits on the size of the data a single
       //  row can have. It is a little complicated because the limit is on the compressed
@@ -188,7 +201,8 @@ trait GpuPartitioning extends Partitioning {
         val tmp = sliceInternalOnGpuAndClose(numRows, partitionIndexes, partitionColumns)
         tmp.zipWithIndex.filter(_._1 != null)
       } else {
-        sliceInternalOnCpuAndClose(numRows, partitionIndexes, partitionColumns)
+        sliceInternalOnCpuAndClose(numRows, partitionIndexes, partitionColumns,
+          usePaddingPartition)
       }
     }
   }
