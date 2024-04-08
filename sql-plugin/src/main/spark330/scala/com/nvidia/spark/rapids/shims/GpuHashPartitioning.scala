@@ -38,8 +38,10 @@ import com.nvidia.spark.rapids.GpuHashPartitioningBase
 import org.apache.spark.sql.catalyst.expressions.Expression
 import org.apache.spark.sql.catalyst.plans.physical.{ClusteredDistribution, Distribution, StatefulOpClusteredDistribution}
 
-case class GpuHashPartitioning(expressions: Seq[Expression], numPartitions: Int)
-  extends GpuHashPartitioningBase(expressions, numPartitions) {
+case class GpuHashPartitioning(expressions: Seq[Expression],
+                               numPartitions: Int,
+                               enablePaddingPartition: Boolean)
+  extends GpuHashPartitioningBase(expressions, numPartitions, enablePaddingPartition) {
 
   override def satisfies0(required: Distribution): Boolean = {
     super.satisfies0(required) || {
