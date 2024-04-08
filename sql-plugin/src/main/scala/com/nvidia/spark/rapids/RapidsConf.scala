@@ -1779,6 +1779,14 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .integerConf
         .createWithDefault(20)
 
+  val SHUFFLE_ENABLE_PADDING_PARTITION =
+    conf("spark.rapids.shuffle.paddingPartition.enabled")
+        .doc("Enable padding partition to avoid the expensive alignment of validity buffer " +
+            "during serializing nullable column vectors for shuffle write")
+        .internal()
+        .booleanConf
+        .createWithDefault(false)
+
   // ALLUXIO CONFIGS
   val ALLUXIO_MASTER = conf("spark.rapids.alluxio.master")
     .doc("The Alluxio master hostname. If not set, read Alluxio master URL from " +
@@ -2787,6 +2795,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMultiThreadedWriterThreads: Int = get(SHUFFLE_MULTITHREADED_WRITER_THREADS)
 
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
+
+  lazy val shuffleEnablePaddingPartition: Boolean = get(SHUFFLE_ENABLE_PADDING_PARTITION)
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode

@@ -177,11 +177,11 @@ class GpuBatchSubPartitioner(
       if (gpuBatch.numRows() > 0 && gpuBatch.numCols() > 0) {
         val types = GpuColumnVector.extractTypes(gpuBatch)
         // 1) Hash partition on the batch
-        val partedTable = GpuHashPartitioningBase.hashPartitionAndClose(
-          gpuBatch, inputBoundKeys, realNumPartitions, "Sub-Hash Calculate", hashSeed)
+        val (pt, parts) = GpuHashPartitioningBase.hashPartitionAndClose(
+          gpuBatch, inputBoundKeys, realNumPartitions, false, "Sub-Hash Calculate", hashSeed)
         // 2) Split into smaller tables according to partitions
-        val subTables = withResource(partedTable) { _ =>
-          partedTable.getTable.contiguousSplit(partedTable.getPartitions.tail: _*)
+        val subTables = withResource(pt) { _ =>
+          pt.contiguousSplit(parts.tail: _*)
         }
         // 3) Make each smaller table spillable and cache them in the queue
         withResource(subTables) { _ =>
