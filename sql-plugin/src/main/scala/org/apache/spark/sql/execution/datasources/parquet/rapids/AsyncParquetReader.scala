@@ -155,7 +155,7 @@ class AsyncParquetReader(
 
   private lazy val numBatches = {
     val value = (totalRowCnt + rowBatchSize - 1) / rowBatchSize
-    logError(s"[$taskID] rowCount:$totalRowCnt; rowBatchSize:$rowBatchSize; numBatches:$value")
+    logInfo(s"[$taskID] rowCount:$totalRowCnt; rowBatchSize:$rowBatchSize; numBatches:$value")
     value
   }
   private val consumedBatches = new AtomicInteger(0)
@@ -179,7 +179,7 @@ class AsyncParquetReader(
     if (!enableDictLateMat) {
       mutable.TreeMap.empty[Int, (HostColumnVector, Array[Int])]
     } else {
-      logError(s"[$taskID] Row Group size ${rowGroupQueue.size}")
+      logInfo(s"[$taskID] Row Group size ${rowGroupQueue.size}")
 
       val builder = mutable.TreeMap.empty[Int, (HostColumnVector, Array[Int])]
       val stack = mutable.Stack[ParquetColumn]()
@@ -199,7 +199,7 @@ class AsyncParquetReader(
               if (typeName == PrimitiveTypeName.BINARY) {
                 DictLateMatUtils.extractDict(rowGroupQueue, descriptor, Some(taskID)) match {
                   case None =>
-                    logError(s"[$taskID] Column ${c.path.mkString(".")} is NOT all dictEncoded")
+                    logInfo(s"[$taskID] Column ${c.path.mkString(".")} is NOT all dictEncoded")
                   case Some(info) =>
                     if (rowGroupRowOffsets == null) {
                       val rgRowOff = Array.ofDim[Int](rowGroupQueue.size + 1)
@@ -209,7 +209,7 @@ class AsyncParquetReader(
                       rowGroupRowOffsets = rgRowOff
                     }
                     builder.put(leafIndex, info.dictVector -> info.dictPageOffsets)
-                    logError(s"[$taskID] Column ${c.path.mkString(".")} is all dictEncoded")
+                    logInfo(s"[$taskID] Column ${c.path.mkString(".")} is all dictEncoded")
                 }
               }
               leafIndex += 1
