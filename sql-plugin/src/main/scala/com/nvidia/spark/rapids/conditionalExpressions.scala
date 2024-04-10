@@ -20,9 +20,9 @@ import ai.rapids.cudf.{BinaryOp, ColumnVector, DType, NullPolicy, Scalar, ScanAg
 import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimExpression
-
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression}
+import org.apache.spark.sql.rapids.GpuContains
 import org.apache.spark.sql.types.{BooleanType, DataType, DataTypes}
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
@@ -155,28 +155,54 @@ trait GpuConditionalExpression extends ComplexTypeMergingExpression with GpuExpr
       predExpr: Expression,
       trueExpr: Expression,
       falseValue: Any): GpuColumnVector = {
-    withResourceIfAllowed(falseValue) { falseRet =>
-      withResource(predExpr.columnarEval(batch)) { pred =>
-        withResourceIfAllowed(trueExpr.columnarEvalAny(batch)) { trueRet =>
-          val finalRet = (trueRet, falseRet) match {
-            case (t: GpuColumnVector, f: GpuColumnVector) =>
-              pred.getBase.ifElse(t.getBase, f.getBase)
-            case (t: GpuScalar, f: GpuColumnVector) =>
-              pred.getBase.ifElse(t.getBase, f.getBase)
-            case (t: GpuColumnVector, f: GpuScalar) =>
-              pred.getBase.ifElse(t.getBase, f.getBase)
-            case (t: GpuScalar, f: GpuScalar) =>
-              pred.getBase.ifElse(t.getBase, f.getBase)
-            case (t, f) =>
-              throw new IllegalStateException(s"Unexpected inputs" +
-                s" ($t: ${t.getClass}, $f: ${f.getClass})")
-          }
-          GpuColumnVector.from(finalRet, dataType)
-        }
-      }
+//    withResourceIfAllowed(falseValue) { falseRet =>
+//      withResource(predExpr.columnarEval(batch)) { pred =>
+//        withResourceIfAllowed(trueExpr.columnarEvalAny(batch)) { trueRet =>
+//          val finalRet = (trueRet, falseRet) match {
+//            case (t: GpuColumnVector, f: GpuColumnVector) =>
+//              pred.getBase.ifElse(t.getBase, f.getBase)
+//            case (t: GpuScalar, f: GpuColumnVector) =>
+//              pred.getBase.ifElse(t.getBase, f.getBase)
+//            case (t: GpuColumnVector, f: GpuScalar) =>
+//              pred.getBase.ifElse(t.getBase, f.getBase)
+//            case (t: GpuScalar, f: GpuScalar) =>
+//              pred.getBase.ifElse(t.getBase, f.getBase)
+//            case (t, f) =>
+//              throw new IllegalStateException(s"Unexpected inputs" +
+//                s" ($t: ${t.getClass}, $f: ${f.getClass})")
+//          }
+//          GpuColumnVector.from(finalRet, dataType)
+//        }
+//      }
+//    }
+    withResource(predExpr.columnarEval(batch)) { pred =>
+      computeIfElse(batch, pred.getBase, trueExpr, falseValue)
     }
   }
-}
+
+  protected def computeIfElse(batch: ColumnarBatch,
+                              pred: ColumnVector,
+                              trueExpr: Expression,
+                              falseValue: Any): GpuColumnVector = {
+    withResourceIfAllowed(falseValue) { falseRet =>
+      withResourceIfAllowed(trueExpr.columnarEvalAny(batch)) { trueRet =>
+        val finalRet = (trueRet, falseRet) match {
+          case (t: GpuColumnVector, f: GpuColumnVector) =>
+            pred.ifElse(t.getBase, f.getBase)
+          case (t: GpuScalar, f: GpuColumnVector) =>
+            pred.ifElse(t.getBase, f.getBase)
+          case (t: GpuColumnVector, f: GpuScalar) =>
+            pred.ifElse(t.getBase, f.getBase)
+          case (t: GpuScalar, f: GpuScalar) =>
+            pred.ifElse(t.getBase, f.getBase)
+          case (t, f) =>
+            throw new IllegalStateException(s"Unexpected inputs" +
+              s" ($t: ${t.getClass}, $f: ${f.getClass})")
+        }
+        GpuColumnVector.from(finalRet, dataType)
+      }
+    }
+  }}
 
 case class GpuIf(
     predicateExpr: Expression,
@@ -355,10 +381,57 @@ case class GpuCaseWhen(
     }
   }
 
+  private val isAllStringContainsOnSameInput: Boolean = {
+    branches.forall{
+      case (GpuContains(_, GpuLiteral(_, _)), _) => true
+    } && branches.groupBy {
+      case (GpuContains(left: Expression, _), _) => left
+    }.size == 1
+  }
+
+  private def evaluateFusedStringContains(batch: ColumnarBatch): GpuColumnVector = {
+    // All branches correspond to the same input strings column.
+    val haystackExpr = branches.head._1.asInstanceOf[GpuContains].left
+    val needles = branches.map{
+      case (GpuContains(_, needle: GpuLiteral), _) => GpuScalar(needle.value, needle.dataType)
+    }.toArray
+
+    // TODO: Placeholder: Array of contains results. Fill out with multi call, eventually.
+    val containsResults = withResource(needles) { _ =>
+      needles.map { needle =>
+        withResource(haystackExpr.columnarEval(batch)) { haystack =>
+          haystack.getBase.stringContains(needle.getBase)
+        }
+      }
+    }
+
+    val elseRet = elseValue
+      .map(_.columnarEvalAny(batch))
+      .getOrElse(GpuScalar(null, branches.last._2.dataType))
+
+    val any = Range(0, branches.size).foldRight[Any](elseRet) {
+      case (i, falseRet) =>
+        computeIfElse(batch, containsResults(i), branches(i)._2, falseRet)
+    }
+    GpuExpressionsUtils.resolveColumnVector(any, batch.numRows())
+  }
+
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
+    /*
+    if (isAllStringContainsOnSameInput) {
+      println("All string contains!")
+      withResource(evaluateFusedStringContains(batch)) { fusedResults =>
+        GpuColumnVector.debug("Input:", batch)
+        ai.rapids.cudf.TableDebug.get.debug("Fused output: ", fusedResults.getBase)
+      }
+    }
+     */
     if (branchesWithSideEffects) {
       columnarEvalWithSideEffects(batch)
-    } else {
+    } else if (isAllStringContainsOnSameInput) {
+      evaluateFusedStringContains(batch)
+    }
+    else {
       // `elseRet` will be closed in `computeIfElse`.
       val elseRet = elseValue
         .map(_.columnarEvalAny(batch))
