@@ -197,7 +197,7 @@ class AsyncParquetReader(
               val descriptor = c.descriptor.get
               val typeName = descriptor.getPrimitiveType.getPrimitiveTypeName
               if (typeName == PrimitiveTypeName.BINARY) {
-                DictLateMatUtils.extractDict(rowGroupQueue, descriptor) match {
+                DictLateMatUtils.extractDict(rowGroupQueue, descriptor, Some(taskID)) match {
                   case None =>
                     logError(s"[$taskID] Column ${c.path.mkString(".")} is NOT all dictEncoded")
                   case Some(info) =>
@@ -395,7 +395,7 @@ class AsyncParquetReader(
     } else {
       val (colIdx, dictData) = dictColumns.unzip
       val (dictVec, dictSliceOffsets) = dictData.unzip
-      logDebug(s"[$taskID] column index: $colIdx -> " +
+      logInfo(s"[$taskID] column index: $colIdx -> " +
         s"dictSlices: [${dictSliceOffsets.map(_.mkString(",")).mkString(" | ")}]")
       Some(HostDictionaryInfo(
         colIdx.toArray, dictVec.toArray, dictSliceOffsets.toArray,
@@ -433,7 +433,7 @@ class AsyncParquetReader(
         batchResult match {
           case Left(_) =>
             numProduced = producedBatches.incrementAndGet()
-            logDebug(s"[$taskID] produced a new batch($numProduced/$numBatches)")
+            logInfo(s"[$taskID] produced a new batch($numProduced/$numBatches)")
           case Right(exception) =>
             throw exception
         }
@@ -470,7 +470,7 @@ class AsyncParquetReader(
       batchResult match {
         case Left(columnBatch) =>
           val numConsumed = consumedBatches.incrementAndGet()
-          logDebug(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
+          logInfo(s"[$taskID] consumed a new batch($numConsumed/$numBatches)")
           columnBatch
         case Right(ex) =>
           throw new AsyncParquetReaderError(ex)

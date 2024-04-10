@@ -32,29 +32,44 @@ case class DictLatMatInfo(dictVector: HostColumnVector, dictPageOffsets: Array[I
 object DictLateMatUtils extends Logging {
 
   def extractDict(rowGroups: Seq[PageReadStore],
-                  descriptor: ColumnDescriptor): Option[DictLatMatInfo] = {
+                  descriptor: ColumnDescriptor,
+                  taskID: Option[Long] = None): Option[DictLatMatInfo] = {
+    lazy val columnPath = descriptor.getPath.mkString(".")
+    try {
+      taskID.foreach(id => logInfo(s"[$id] extracting DictPages of column($columnPath)..."))
 
-    val dictPages = mutable.ArrayBuffer[DictionaryPage]()
+      val dictPages = mutable.ArrayBuffer[DictionaryPage]()
 
-    // Go through each RowGroup and each page inside them to check if all pages use Dictionary.
-    // Dictionary late materialization only works if all pages use Dictionary.
-    rowGroups.foreach { rowGroup =>
-      val pageReader = rowGroup.getPageReader(descriptor)
-      val dictPage = pageReader.readDictionaryPage()
-      if (dictPage == null || !isAllDictEncoded(pageReader)) {
-        return None
+      // Go through each RowGroup and each page inside them to check if all pages use Dictionary.
+      // Dictionary late materialization only works if all pages use Dictionary.
+      rowGroups.foreach { rowGroup =>
+        val pageReader = rowGroup.getPageReader(descriptor)
+        val dictPage = pageReader.readDictionaryPage()
+        if (dictPage == null || !isAllDictEncoded(pageReader, taskID)) {
+          taskID.foreach(id => logInfo(s"[$id] extracted DictPages of column($columnPath): None"))
+          return None
+        }
+        dictPages += dictPage
       }
-      dictPages += dictPage
+      taskID.foreach(id => logInfo(s"[$id] combining DictPages of column($columnPath)"))
+      val info = combineDictPages(dictPages, descriptor, taskID)
+      taskID.foreach(id => logInfo(s"[$id] extracted DictPages of column($columnPath): AllDict"))
+      Some(info)
+    } catch {
+      case ex: Exception =>
+        taskID.foreach { id =>
+          logError(s"[$id] Failed to DictPages of column($columnPath)..." + ex)
+        }
+        throw ex
     }
-
-    Some(combineDictPages(dictPages, descriptor))
   }
 
   private def combineDictPages(dictPages: Seq[DictionaryPage],
-                               descriptor: ColumnDescriptor): DictLatMatInfo = {
+                               descriptor: ColumnDescriptor,
+                               taskID: Option[Long]): DictLatMatInfo = {
     val pageOffsets = mutable.ArrayBuffer[Int](0)
     var rowNum: Int = 0
-
+    taskID.foreach { id => logInfo(s"[$id] combineDictPages checkpoint(1)") }
     val dictionaries = dictPages.map { dictPage =>
       val dictionary = dictPage.getEncoding.initDictionary(descriptor, dictPage)
         .asInstanceOf[PlainBinaryDictionary]
@@ -87,11 +102,11 @@ object DictLateMatUtils extends Logging {
 
     val dictVector = new HostColumnVector(DType.STRING, rowNum, Optional.of(0L),
       charBuf, null, offsetBuf, new java.util.ArrayList[HostColumnVectorCore]())
-
+    taskID.foreach { id => logInfo(s"[$id] combineDictPages checkpoint(2)") }
     DictLatMatInfo(dictVector, pageOffsets.toArray)
   }
 
-  private def isAllDictEncoded(pageReader: PageReader): Boolean = {
+  private def isAllDictEncoded(pageReader: PageReader, taskID: Option[Long]): Boolean = {
     require(ccPageReader.isInstance(pageReader),
       "Only supports org.apache.parquet.hadoop.ColumnChunkPageReadStore.ColumnChunkPageReader")
     val rawPagesField = ccPageReader.getDeclaredField("compressedPages")
@@ -101,6 +116,7 @@ object DictLateMatUtils extends Logging {
     val swapQueue = new java.util.ArrayDeque[DataPage]()
     var allDictEncoded = true
 
+    taskID.foreach { id => logInfo(s"[$id] isAllDictEncoded checkpoint(1)") }
     while (!pageQueue.isEmpty) {
       swapQueue.addLast(pageQueue.pollFirst())
       if (allDictEncoded) {
@@ -112,10 +128,11 @@ object DictLateMatUtils extends Logging {
         }
       }
     }
+    taskID.foreach { id => logInfo(s"[$id] isAllDictEncoded checkpoint(2)") }
     while (!swapQueue.isEmpty) {
       pageQueue.addLast(swapQueue.pollFirst())
     }
-
+    taskID.foreach { id => logInfo(s"[$id] isAllDictEncoded checkpoint(3)") }
     allDictEncoded
   }
 
