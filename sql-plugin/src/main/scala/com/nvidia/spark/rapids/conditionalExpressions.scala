@@ -396,12 +396,10 @@ case class GpuCaseWhen(
       case (GpuContains(_, needle: GpuLiteral), _) => GpuScalar(needle.value, needle.dataType)
     }.toArray
 
-    // TODO: Placeholder: Array of contains results. Fill out with multi call, eventually.
-    val containsResults = withResource(needles) { _ =>
-      needles.map { needle =>
-        withResource(haystackExpr.columnarEval(batch)) { haystack =>
-          haystack.getBase.stringContains(needle.getBase)
-        }
+    val containsResults = withResource(haystackExpr.columnarEval(batch)) { haystack =>
+      withResource(needles) { needles =>
+        val needleScalars = needles.map{ _.getBase }
+        haystack.getBase.stringContains(needleScalars)
       }
     }
 
@@ -409,23 +407,16 @@ case class GpuCaseWhen(
       .map(_.columnarEvalAny(batch))
       .getOrElse(GpuScalar(null, branches.last._2.dataType))
 
-    val any = Range(0, branches.size).foldRight[Any](elseRet) {
-      case (i, falseRet) =>
-        computeIfElse(batch, containsResults(i), branches(i)._2, falseRet)
+    val any = withResource(containsResults) { _ =>
+      Range(0, branches.size).foldRight[Any](elseRet) {
+        case (i, falseRet) =>
+          computeIfElse(batch, containsResults(i), branches(i)._2, falseRet)
+      }
     }
     GpuExpressionsUtils.resolveColumnVector(any, batch.numRows())
   }
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
-    /*
-    if (isAllStringContainsOnSameInput) {
-      println("All string contains!")
-      withResource(evaluateFusedStringContains(batch)) { fusedResults =>
-        GpuColumnVector.debug("Input:", batch)
-        ai.rapids.cudf.TableDebug.get.debug("Fused output: ", fusedResults.getBase)
-      }
-    }
-     */
     if (branchesWithSideEffects) {
       columnarEvalWithSideEffects(batch)
     } else if (isAllStringContainsOnSameInput) {
