@@ -156,26 +156,6 @@ trait GpuConditionalExpression extends ComplexTypeMergingExpression with GpuExpr
       predExpr: Expression,
       trueExpr: Expression,
       falseValue: Any): GpuColumnVector = {
-//    withResourceIfAllowed(falseValue) { falseRet =>
-//      withResource(predExpr.columnarEval(batch)) { pred =>
-//        withResourceIfAllowed(trueExpr.columnarEvalAny(batch)) { trueRet =>
-//          val finalRet = (trueRet, falseRet) match {
-//            case (t: GpuColumnVector, f: GpuColumnVector) =>
-//              pred.getBase.ifElse(t.getBase, f.getBase)
-//            case (t: GpuScalar, f: GpuColumnVector) =>
-//              pred.getBase.ifElse(t.getBase, f.getBase)
-//            case (t: GpuColumnVector, f: GpuScalar) =>
-//              pred.getBase.ifElse(t.getBase, f.getBase)
-//            case (t: GpuScalar, f: GpuScalar) =>
-//              pred.getBase.ifElse(t.getBase, f.getBase)
-//            case (t, f) =>
-//              throw new IllegalStateException(s"Unexpected inputs" +
-//                s" ($t: ${t.getClass}, $f: ${f.getClass})")
-//          }
-//          GpuColumnVector.from(finalRet, dataType)
-//        }
-//      }
-//    }
     withResource(predExpr.columnarEval(batch)) { pred =>
       computeIfElse(batch, pred.getBase, trueExpr, falseValue)
     }
@@ -385,6 +365,7 @@ case class GpuCaseWhen(
   private val isAllStringContainsOnSameInput: Boolean = {
     branches.forall{
       case (GpuContains(_, GpuLiteral(_, _)), _) => true
+      case _ => false
     } && branches.groupBy {
       case (GpuContains(left: Expression, _), _) => left
     }.size == 1
