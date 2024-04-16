@@ -21,6 +21,7 @@ import com.nvidia.spark.rapids.Arm._
 import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.shims.ShimExpression
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.analysis.{TypeCheckResult, TypeCoercion}
 import org.apache.spark.sql.catalyst.expressions.{ComplexTypeMergingExpression, Expression}
 import org.apache.spark.sql.rapids.GpuContains
@@ -321,7 +322,8 @@ case class GpuIf(
 
 case class GpuCaseWhen(
     branches: Seq[(Expression, Expression)],
-    elseValue: Option[Expression] = None) extends GpuConditionalExpression with Serializable {
+    elseValue: Option[Expression] = None)
+    extends GpuConditionalExpression with Serializable with Logging {
 
   import GpuExpressionWithSideEffectUtils._
 
@@ -378,6 +380,10 @@ case class GpuCaseWhen(
       case (GpuContains(_, needle: GpuLiteral), _) => GpuScalar(needle.value, needle.dataType)
     }.toArray
 
+    logDebug("Evaluating CASE WHEN in fused mode for string-contains. " +
+             s"Number of needles being searched for: ${needles.length}, " +
+             s"Size of haystack: ${batch.numRows()}")
+
     val containsResults = withResource(haystackExpr.columnarEval(batch)) { haystack =>
       withResource(needles) { needles =>
         val needleScalars = needles.map{ _.getBase }
@@ -400,11 +406,13 @@ case class GpuCaseWhen(
 
   override def columnarEval(batch: ColumnarBatch): GpuColumnVector = {
     if (branchesWithSideEffects) {
+      logDebug("Evaluating CASE WHEN with side-effects...")
       columnarEvalWithSideEffects(batch)
     } else if (isAllStringContainsOnSameInput) {
       evaluateFusedStringContains(batch)
     }
     else {
+      logWarning("Evaluating Case When with serial execution")
       // `elseRet` will be closed in `computeIfElse`.
       val elseRet = elseValue
         .map(_.columnarEvalAny(batch))
