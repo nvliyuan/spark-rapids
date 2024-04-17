@@ -314,8 +314,9 @@ case class GpuInsertIntoHiveTable(
                 if (!fs.delete(path, true)) {
                   throw RapidsHiveErrors.cannotRemovePartitionDirError(path)
                 }
-                // Don't let Hive do overwrite operation since it is slower.
-                doHiveOverwrite = false
+                // Don't let Hive do overwrite operation since it is slower. But give a chance
+                // for overriding this behavior.
+                doHiveOverwrite = hadoopConf.getBoolean("hive.movetask.enable.dir.move", false)
               }
             }
           }
