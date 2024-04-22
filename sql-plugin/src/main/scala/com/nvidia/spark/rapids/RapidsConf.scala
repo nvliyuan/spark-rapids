@@ -714,6 +714,12 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createOptional
 
+  val PROFILE_EXECUTORS = conf("spark.rapids.profile.executors")
+    .doc("Comma-separated list of executors to profile when profiling is enabled")
+    .internal()
+    .stringConf
+    .createWithDefault("0")
+
   // ENABLE/DISABLE PROCESSING
 
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
@@ -2383,6 +2389,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val metricsLevel: String = get(METRICS_LEVEL)
 
   lazy val profilePath: Option[String] = get(PROFILE_PATH)
+
+  lazy val profileExecutors: String = get(PROFILE_EXECUTORS)
 
   lazy val isSqlEnabled: Boolean = get(SQL_ENABLED)
 
