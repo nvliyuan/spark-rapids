@@ -29,9 +29,10 @@ import ai.rapids.cudf.{Cuda, CudaException, CudaFatalException, CudfException, M
 import com.nvidia.spark.rapids.RapidsConf.AllowMultipleJars
 import com.nvidia.spark.rapids.RapidsPluginUtils.buildInfoEvent
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
-import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Profiler}
+import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import org.apache.commons.lang3.exception.ExceptionUtils
+import org.apache.hadoop.conf.Configuration
 
 import org.apache.spark.{ExceptionFailure, SparkConf, SparkContext, TaskFailedReason}
 import org.apache.spark.api.plugin.{DriverPlugin, ExecutorPlugin, PluginContext, SparkPlugin}
@@ -43,6 +44,7 @@ import org.apache.spark.sql.execution._
 import org.apache.spark.sql.internal.StaticSQLConf
 import org.apache.spark.sql.rapids.GpuShuffleEnv
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.util.SerializableConfiguration
 
 class PluginException(msg: String) extends RuntimeException(msg)
 
@@ -426,6 +428,7 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   var rapidsShuffleHeartbeatManager: RapidsShuffleHeartbeatManager = null
   private lazy val extraDriverPlugins =
     RapidsPluginUtils.extraPlugins.map(_.driverPlugin()).filterNot(_ == null)
+  private var hadoopConf: Option[Configuration] = None
 
   override def receive(msg: Any): AnyRef = {
     msg match {
@@ -445,12 +448,14 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
         }
         rapidsShuffleHeartbeatManager.executorHeartbeat(id)
       case m: GpuCoreDumpMsg => GpuCoreDumpHandler.handleMsg(m)
+      case m: ProfileMsg => handleProfileMsg(m)
       case m => throw new IllegalStateException(s"Unknown message $m")
     }
   }
 
   override def init(
     sc: SparkContext, pluginContext: PluginContext): java.util.Map[String, String] = {
+    hadoopConf = Some(sc.hadoopConfiguration)
     val sparkConf = pluginContext.conf
     RapidsPluginUtils.fixupConfigsOnDriver(sparkConf)
     val conf = new RapidsConf(sparkConf)
@@ -485,6 +490,19 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
     extraDriverPlugins.foreach(_.shutdown())
     FileCacheLocalityManager.shutdown()
   }
+
+  private def handleProfileMsg(m: ProfileMsg): AnyRef = m match {
+    case ProfileStartMsg(executorId, path) =>
+      logWarning(s"Executor $executorId started profiling to $path")
+      hadoopConf.map(c => new SerializableConfiguration(c)).getOrElse {
+        throw new IllegalStateException("Hadoop configuration not set")
+      }
+    case ProfileEndMsg(executorId, path) =>
+      logWarning(s"Executor $executorId ended profiling, data saved to $path")
+      null
+    case _ =>
+      throw new IllegalStateException(s"Unexpected profile msg: $m")
+  }
 }
 
 /**
@@ -494,7 +512,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   var rapidsShuffleHeartbeatEndpoint: RapidsShuffleHeartbeatEndpoint = null
   private lazy val extraExecutorPlugins =
     RapidsPluginUtils.extraPlugins.map(_.executorPlugin()).filterNot(_ == null)
-  private var profilePath: Option[String] = None
 
   override def init(
       pluginContext: PluginContext,
@@ -506,11 +523,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       val sparkConf = pluginContext.conf()
       val numCores = RapidsPluginUtils.estimateCoresOnExec(sparkConf)
       val conf = new RapidsConf(extraConf.asScala.toMap)
-      profilePath = conf.profilePath
-      profilePath.foreach { _ =>
-        logWarning("Starting profiler")
-        Profiler.init()
-      }
+      ProfilerManager.init(pluginContext, conf)
 
       // Checks if the current GPU architecture is supported by the
       // spark-rapids-jni and cuDF libraries.
@@ -660,9 +673,7 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
     GpuSemaphore.shutdown()
     PythonWorkerSemaphore.shutdown()
     GpuDeviceManager.shutdown()
-    profilePath.foreach { _ =>
-      Profiler.shutdown();
-    }
+    ProfilerManager.shutdown()
     Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close())
     extraExecutorPlugins.foreach(_.shutdown())
     FileCache.shutdown()
