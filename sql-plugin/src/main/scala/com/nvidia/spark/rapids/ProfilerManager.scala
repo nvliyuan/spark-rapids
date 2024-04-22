@@ -17,12 +17,12 @@
 package com.nvidia.spark.rapids
 
 import java.nio.channels.{Channels, WritableByteChannel}
-
 import com.nvidia.spark.rapids.jni.Profiler
 import org.apache.hadoop.fs.Path
-
 import org.apache.spark.api.plugin.PluginContext
 import org.apache.spark.util.SerializableConfiguration
+
+import java.nio.ByteBuffer
 
 object ProfilerManager {
   private var writer: Option[ProfileWriter] = None
@@ -58,16 +58,32 @@ class ProfileWriter(
   private val out = openOutput()
   private var isClosed = false
 
+  override def write(data: ByteBuffer): Unit = {
+    while (data.hasRemaining()) {
+      out.write(data)
+    }
+  }
+
   override def close(): Unit = {
     if (!isClosed) {
+      isClosed = true
       out.close()
       pluginCtx.send(ProfileEndMsg(executorId, outPath.toString))
     }
   }
+
+  private def getAppId: String = {
+    val appId = pluginCtx.conf.get("spark.app.id", "")
+    if (appId.isEmpty) {
+      java.lang.management.ManagementFactory.getRuntimeMXBean.getName
+    } else {
+      appId
+    }
+  }
+
   private def getOutputPath(prefix: String): Path = {
-    val appId = pluginCtx.conf.get("spark.app.id")
     val parentDir = new Path(prefix)
-    new Path(parentDir, s"rapids-profile-$appId-$executorId.bin")
+    new Path(parentDir, s"rapids-profile-$getAppId-$executorId.bin")
   }
 
   private def openOutput(): WritableByteChannel = {
