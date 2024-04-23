@@ -16,15 +16,17 @@
 
 package com.nvidia.spark.rapids
 
+import java.nio.ByteBuffer
 import java.nio.channels.{Channels, WritableByteChannel}
+
 import com.nvidia.spark.rapids.jni.Profiler
 import org.apache.hadoop.fs.Path
+
 import org.apache.spark.api.plugin.PluginContext
+import org.apache.spark.internal.Logging
 import org.apache.spark.util.SerializableConfiguration
 
-import java.nio.ByteBuffer
-
-object ProfilerManager {
+object ProfilerManager extends Logging {
   private var writer: Option[ProfileWriter] = None
 
   def init(pluginCtx: PluginContext, conf: RapidsConf): Unit = {
@@ -32,7 +34,10 @@ object ProfilerManager {
     writer = conf.profilePath.flatMap { pathPrefix =>
       val executorId = pluginCtx.executorID()
       if (shouldProfile(executorId, conf)) {
-        Some(new ProfileWriter(pluginCtx, pathPrefix))
+        logInfo("Starting profiler")
+        val w = new ProfileWriter(pluginCtx, pathPrefix)
+        Profiler.init(w)
+        Some(w)
       } else {
         None
       }
@@ -40,8 +45,10 @@ object ProfilerManager {
   }
 
   def shutdown(): Unit = {
-    Profiler.shutdown()
-    writer.foreach(_.close())
+    writer.foreach { w =>
+      Profiler.shutdown()
+      w.close()
+    }
     writer = None
   }
 
