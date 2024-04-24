@@ -364,32 +364,50 @@ case class GpuCaseWhen(
     }
   }
 
-  private val isAllStringContainsOnSameInput: Boolean = {
+  private val isAllStringContains: Boolean = {
     branches.forall{
       case (GpuContains(_, GpuLiteral(_, _)), _) => true
       case _ => false
-    } && branches.groupBy {
-      case (GpuContains(left: Expression, _), _) => left
-    }.size == 1
+    }
+  }
+
+  private lazy val groupedContainsCaseConditions
+      : Map[Expression, Seq[(Int, Expression, Expression)]] = {
+    branches.map {
+      case (GpuContains(haystack, needle @ GpuLiteral(_,_)), _) => (haystack, needle)
+    }.zipWithIndex.map {
+      case ((haystack, needle), idx) => (idx, haystack, needle)
+    }.groupBy {
+      case (_, haystack, _) => haystack
+    }
   }
 
   private def evaluateFusedStringContains(batch: ColumnarBatch): GpuColumnVector = {
-    // All branches correspond to the same input strings column.
-    val haystackExpr = branches.head._1.asInstanceOf[GpuContains].left
-    val needles = branches.map{
-      case (GpuContains(_, needle: GpuLiteral), _) => GpuScalar(needle.value, needle.dataType)
-    }.toArray
 
-    logDebug("Evaluating CASE WHEN in fused mode for string-contains. " +
-             s"Number of needles being searched for: ${needles.length}, " +
-             s"Size of haystack: ${batch.numRows()}")
+    val containsResults: Array[ColumnVector] =
+      groupedContainsCaseConditions.map { case (_, set) =>
 
-    val containsResults = withResource(haystackExpr.columnarEval(batch)) { haystack =>
-      withResource(needles) { needles =>
-        val needleScalars = needles.map{ _.getBase }
-        haystack.getBase.stringContains(needleScalars)
+      val haystackExpr = set.head._2  // The set is grouped on the common haystack.
+      val needles = set.toArray.map {
+        case (_, _, needle: GpuLiteral) => GpuScalar(needle.value, needle.dataType)
       }
-    }
+
+      logDebug("Evaluating CASE WHEN in fused mode for string-contains. " +
+        s"Number of needles being searched for: ${needles.length}, " +
+        s"Size of haystack: ${batch.numRows()}")
+
+      val containsResults = withResource(haystackExpr.columnarEval(batch)) { haystack =>
+        withResource(needles) { needles =>
+          val needleScalars = needles.map{ _.getBase }
+          haystack.getBase.stringContains(needleScalars)
+        }
+      }
+
+      containsResults.zip(set).map {
+        case (outputVector, (idx, _, _)) => (idx, outputVector)
+      }
+
+    }.flatten.toArray.sortBy(_._1).map(_._2)
 
     val elseRet = elseValue
       .map(_.columnarEvalAny(batch))
@@ -408,11 +426,11 @@ case class GpuCaseWhen(
     if (branchesWithSideEffects) {
       logDebug("Evaluating CASE WHEN with side-effects...")
       columnarEvalWithSideEffects(batch)
-    } else if (isAllStringContainsOnSameInput) {
+    } else if (isAllStringContains) {
       evaluateFusedStringContains(batch)
     }
     else {
-      logWarning("Evaluating Case When with serial execution")
+      logWarning("Evaluating CASE WHEN with serial execution")
       // `elseRet` will be closed in `computeIfElse`.
       val elseRet = elseValue
         .map(_.columnarEvalAny(batch))
