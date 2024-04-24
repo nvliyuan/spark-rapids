@@ -37,7 +37,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	private HostMemoryBuffer charOffsets = null;
 	private int lastCharRowId = -1;
 
-	private int rowGroupOffset = 0;
+	private int currentRowGroupOffset = 0;
 	private int rowGroupArrayOffset = 0;
 	private int rowGroupStringOffset = 0;
 	private int rowGroupIndex = 0;
@@ -61,6 +61,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	private HostColumnVectorCore buildImpl(boolean topLevel, long[] sizeCounter) {
 		// Make sure all subVectors are fully "flushed" before the materialization.
 		assert rowGroupIndex == 0 && rowGroupArrayIndex == 0;
+		int numRow = currentRowGroupOffset;
 
 		// System.err.format("[seed=%d]building %s(rowCnt=%d,arrayOffset=%d,charOffset=%d,capacity=%d)\n",
 		// 			rdSeed, type, rowGroupOffset, rowGroupArrayOffset, rowGroupStringOffset, capacity);
@@ -78,9 +79,9 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 			sizeCounter[0] += offsetBuffer.getLength();
 		} else if (type instanceof StringType) {
 			// padding tail offsets
-			if (lastCharRowId + 1 < rowGroupOffset) {
+			if (lastCharRowId + 1 < numRow) {
 				int byteArrayEnd = charOffsets.getInt((lastCharRowId + 1) * 4L);
-				for (int i = lastCharRowId + 2; i < rowGroupOffset + 1; ++i)
+				for (int i = lastCharRowId + 2; i < numRow + 1; ++i)
 					charOffsets.setInt(i * 4L, byteArrayEnd);
 			}
 			offsetBuffer = charOffsets;
@@ -99,7 +100,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 
 		// Build bitwise validity mask
 		if (valids != null) {
-			validBuffer = buildNullMask(valids, rowGroupOffset);
+			validBuffer = buildNullMask(valids, numRow);
 			 valids.close();
 			 valids = null;
 			sizeCounter[0] += validBuffer.getLength();
@@ -109,7 +110,8 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		List<HostColumnVectorCore> children = new ArrayList<>();
 		if (childColumns != null && !(type instanceof StringType)) {
 			for (WritableColumnVector ch : childColumns) {
-				children.add(((RapidsWritableColumnVector) ch).buildImpl(false, sizeCounter));
+				children.add(((RapidsWritableColumnVector) ch).buildImpl(
+						false, sizeCounter));
 			}
 		}
 
@@ -125,12 +127,26 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 			children.add(cv);
 		}
 
+		if (numRow == 0) {
+			if (dataBuffer != null) {
+				dataBuffer.close();
+				dataBuffer = null;
+			}
+			if (validBuffer != null) {
+				validBuffer.close();
+				validBuffer = null;
+			}
+			if (offsetBuffer != null) {
+				offsetBuffer.close();
+				offsetBuffer = null;
+			}
+		}
 		if (topLevel) {
 			return new HostColumnVector(
-					cudfType, rowGroupOffset, nullCnt, dataBuffer, validBuffer, offsetBuffer, children);
+					cudfType, numRow, nullCnt, dataBuffer, validBuffer, offsetBuffer, children);
 		}
 		return new HostColumnVectorCore(
-				cudfType, rowGroupOffset, nullCnt, dataBuffer, validBuffer, offsetBuffer, children);
+				cudfType, numRow, nullCnt, dataBuffer, validBuffer, offsetBuffer, children);
 	}
 
 	private HostMemoryBuffer buildNullMask(HostMemoryBuffer byteMask, int numRecord) {
@@ -166,7 +182,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 			for (WritableColumnVector c: childColumns)
 				c.reset();
 		}
-		rowGroupOffset += rowGroupIndex;
+		currentRowGroupOffset += rowGroupIndex;
 		rowGroupIndex = 0;
 		rowGroupArrayOffset += rowGroupArrayIndex;
 		rowGroupArrayIndex = 0;
@@ -185,7 +201,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 
 		this.rowGroupIndex = 0;
 		this.rowGroupArrayIndex = 0;
-		this.rowGroupOffset = 0;
+		this.currentRowGroupOffset = 0;
 		this.rowGroupArrayOffset = 0;
 		this.rowGroupStringOffset = 0;
 
@@ -203,6 +219,10 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		}
 	}
 
+	public int getCurrentRowGroupSize() {
+		return rowGroupIndex;
+	}
+
 	public boolean hasNullMask() {
 		return valids != null;
 	}
@@ -210,7 +230,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putBooleans(int rowId, byte src) {
 		rowGroupIndex += 8;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setByte(rowId, (byte)(src & 1));
 		data.setByte(rowId + 1, (byte)(src >>> 1 & 1));
 		data.setByte(rowId + 2, (byte)(src >>> 2 & 1));
@@ -225,14 +245,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	public boolean isNullAt(int rowId) {
 		if (isAllNull) return true;
 		if (valids == null) return false;
-		return valids.getByte(rowGroupOffset + rowId) == 1;
+		return valids.getByte(currentRowGroupOffset + rowId) == 1;
 	}
 
 	@Override
 	public void putNotNull(int rowId) {
 		rowGroupIndex++;
 		if (!hasNull() || valids == null) return;
-		valids.setByte(rowGroupOffset + rowId, (byte) 0);
+		valids.setByte(currentRowGroupOffset + rowId, (byte) 0);
 	}
 
 	@Override
@@ -241,7 +261,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		if (valids == null) {
 			allocateNullVector(capacity, true);
 		}
-		valids.setByte(rowGroupOffset + rowId, (byte) 1);
+		valids.setByte(currentRowGroupOffset + rowId, (byte) 1);
 		++numNulls;
 	}
 
@@ -251,7 +271,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		if (valids == null) {
 			allocateNullVector(capacity, true);
 		}
-		valids.setMemory(rowGroupOffset + rowId, count, (byte) 1);
+		valids.setMemory(currentRowGroupOffset + rowId, count, (byte) 1);
 		numNulls += count;
 	}
 
@@ -259,50 +279,50 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	public void putNotNulls(int rowId, int count) {
 		// rowCnt = Math.max(rowCnt, rowId + count);
 		if (!hasNull() || valids == null) return;
-		valids.setMemory(rowGroupOffset + rowId, count, (byte) 0);
+		valids.setMemory(currentRowGroupOffset + rowId, count, (byte) 0);
 	}
 
 	@Override
 	public void putBoolean(int rowId, boolean value) {
 		rowGroupIndex++;
-		data.setBoolean(rowGroupOffset + rowId, value);
+		data.setBoolean(currentRowGroupOffset + rowId, value);
 	}
 
 	@Override
 	public void putBooleans(int rowId, int count, boolean value) {
 		rowGroupIndex += count;
-		data.setMemory(rowGroupOffset + rowId, count, value ? (byte) 1 : (byte) 0);
+		data.setMemory(currentRowGroupOffset + rowId, count, value ? (byte) 1 : (byte) 0);
 	}
 
 	@Override
 	public void putByte(int rowId, byte value) {
 		rowGroupIndex++;
-		data.setByte(rowGroupOffset + rowId, value);
+		data.setByte(currentRowGroupOffset + rowId, value);
 	}
 
 	@Override
 	public void putBytes(int rowId, int count, byte value) {
 		rowGroupIndex += count;
-		data.setMemory(rowGroupOffset + rowId, count, value);
+		data.setMemory(currentRowGroupOffset + rowId, count, value);
 	}
 
 	@Override
 	public void putBytes(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		data.setBytes(rowGroupOffset + rowId, src, srcIndex, count);
+		data.setBytes(currentRowGroupOffset + rowId, src, srcIndex, count);
 	}
 
 	@Override
 	public void putShort(int rowId, short value) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setShort(rowId * 2L, value);
 	}
 
 	@Override
 	public void putShorts(int rowId, int count, short value) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		for (int offset = rowId; offset < rowId + count; offset++) {
 			data.setShort(offset * 2L, value);
 		}
@@ -311,28 +331,28 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putShorts(int rowId, int count, short[] src, int srcIndex) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setShorts(rowId * 2L, src, srcIndex, count);
 	}
 
 	@Override
 	public void putShorts(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setBytes(rowId * 2L, src, srcIndex, count * 2L);
 	}
 
 	@Override
 	public void putInt(int rowId, int value) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setInt(rowId * 4L, value);
 	}
 
 	@Override
 	public void putInts(int rowId, int count, int value) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		for (int offset = rowId; offset < rowId + count; offset++) {
 			data.setInt(offset * 4L, value);
 		}
@@ -341,14 +361,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putInts(int rowId, int count, int[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setInts(rowId * 4L, src, srcIndex, count);
 	}
 
 	@Override
 	public void putInts(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setBytes(rowId * 4L, src, srcIndex, count * 4L);
 	}
 
@@ -360,14 +380,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putLong(int rowId, long value) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setLong(rowId * 8L, value);
 	}
 
 	@Override
 	public void putLongs(int rowId, int count, long value) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		for (int offset = rowId; offset < rowId + count; offset++) {
 			data.setLong(offset * 8L, value);
 		}
@@ -376,14 +396,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putLongs(int rowId, int count, long[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setLongs(rowId * 8L, src, srcIndex, count);
 	}
 
 	@Override
 	public void putLongs(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setBytes(rowId * 8L, src, srcIndex, count * 8L);
 	}
 
@@ -395,14 +415,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putFloat(int rowId, float value) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setFloat(rowId * 4L, value);
 	}
 
 	@Override
 	public void putFloats(int rowId, int count, float value) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		for (int offset = rowId; offset < rowId + count; offset++) {
 			data.setFloat(offset * 4L, value);
 		}
@@ -411,14 +431,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putFloats(int rowId, int count, float[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setFloats(rowId * 4L, src, srcIndex, count);
 	}
 
 	@Override
 	public void putFloats(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setBytes(rowId * 4L, src, srcIndex, count * 4L);
 	}
 
@@ -430,14 +450,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putDouble(int rowId, double value) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setDouble(rowId * 8L, value);
 	}
 
 	@Override
 	public void putDoubles(int rowId, int count, double value) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		for (int offset = rowId; offset < rowId + count; offset++) {
 			data.setDouble(offset * 8L, value);
 		}
@@ -446,14 +466,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putDoubles(int rowId, int count, double[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setDoubles(rowId * 8L, src, srcIndex, count);
 	}
 
 	@Override
 	public void putDoubles(int rowId, int count, byte[] src, int srcIndex) {
 		rowGroupIndex += count;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		data.setBytes(rowId * 8L, src, srcIndex, count * 8L);
 	}
 
@@ -465,13 +485,14 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 	@Override
 	public void putArray(int rowId, int offset, int length) {
 		rowGroupArrayIndex += length;
-		arrayOffsets.setInt((rowGroupOffset + rowId + 1) * 4L, rowGroupArrayOffset + rowGroupArrayIndex);
+		arrayOffsets.setInt((currentRowGroupOffset + rowId + 1) * 4L,
+				rowGroupArrayOffset + rowGroupArrayIndex);
 	}
 
 	@Override
 	public int putByteArray(int rowId, byte[] value, int offset, int length) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 
 		int result = childColumns[0].appendBytes(length, value, offset) + rowGroupStringOffset;
 
@@ -486,13 +507,13 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 
 	public void putBytesUnsafely(int rowId, HostMemoryBuffer buffer, int offset, int length) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 
 		RapidsWritableColumnVector chars = (RapidsWritableColumnVector) childColumns[0];
 		int globalOffset = chars.elementsAppended + rowGroupStringOffset;
 
 		chars.reserve(chars.elementsAppended + length);
-		int charsDstOffset = chars.elementsAppended + chars.rowGroupOffset;
+		int charsDstOffset = chars.elementsAppended + chars.currentRowGroupOffset;
 
 		if (length < 8) {
 			for (int i = offset; i < offset + length; i++) {
@@ -523,7 +544,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 
 	public void commitStringAppend(int rowId, int prevOffset, int curLength) {
 		rowGroupIndex++;
-		rowId += rowGroupOffset;
+		rowId += currentRowGroupOffset;
 		prevOffset += rowGroupStringOffset;
 
 		for (int i = lastCharRowId + 1; i < rowId; ++i) {
@@ -535,7 +556,7 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 
 	@Override
 	public void reserve(int requiredCapacity) {
-		super.reserve(requiredCapacity + rowGroupOffset);
+		super.reserve(requiredCapacity + currentRowGroupOffset);
 	}
 
 	@Override
