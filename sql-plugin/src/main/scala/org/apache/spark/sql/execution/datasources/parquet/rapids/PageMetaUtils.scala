@@ -17,28 +17,23 @@
 package org.apache.spark.sql.execution.datasources.parquet.rapids
 
 import java.util
-import java.util.Optional
 
 import scala.collection.JavaConverters.asScalaIteratorConverter
 import scala.collection.mutable
 
-import ai.rapids.cudf.{DType, HostColumnVector, HostColumnVectorCore, HostMemoryBuffer}
 import org.apache.parquet.column.ColumnDescriptor
 import org.apache.parquet.column.page.{DataPage, DataPageV1, DataPageV2, DictionaryPage, PageReader, PageReadStore}
-import org.apache.parquet.column.values.dictionary.PlainValuesDictionary.PlainBinaryDictionary
 import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName
 
 import org.apache.spark.internal.Logging
 
-
-case class DictLatMatPatch(dictVector: HostColumnVector, dictPageOffsets: Array[Int])
 
 case class BinaryColumnMetaSummary(isAllDictEncoded: Boolean,
                                    sizeInBytes: Long,
                                    sizeInRows: Long,
                                    dictPages: Option[Array[DictionaryPage]])
 
-object BinaryColumnMetaUtils extends Logging {
+object PageMetaUtils extends Logging {
 
   // Go through each RowGroup and each page inside them to collect 4 items:
   // * whether all pages are dictionary-encoded or not
@@ -111,49 +106,6 @@ object BinaryColumnMetaUtils extends Logging {
     }
 
     (pageNum, dctEcdPageNum, bs, rs)
-  }
-
-  def buildDictLateMatPatch(dictPages: Seq[DictionaryPage],
-                            descriptor: ColumnDescriptor): DictLatMatPatch = {
-    val pageOffsets = mutable.ArrayBuffer[Int](0)
-    var rowNum: Int = 0
-    val dictionaries = dictPages.map { dictPage =>
-      val dictionary = dictPage.getEncoding.initDictionary(descriptor, dictPage)
-        .asInstanceOf[PlainBinaryDictionary]
-      rowNum += dictionary.getMaxId + 1
-      pageOffsets += rowNum
-      dictionary
-    }
-
-    var charNum: Int = 0
-    val offsetBuf = HostMemoryBuffer.allocate((rowNum + 1) * 4L)
-    offsetBuf.setInt(0, 0)
-    var i = 1
-    dictionaries.foreach { dict =>
-      (0 to dict.getMaxId).foreach { j =>
-        charNum += dict.decodeToBinary(j).length()
-        offsetBuf.setInt(i * 4L, charNum)
-        i += 1
-      }
-    }
-    // There exists dict without any non-empty string values, in case of null ptr error during
-    // copyFromHostToDevice, allocating at least 1 byte for char buffer.
-    val charBuf = HostMemoryBuffer.allocate(charNum max 1)
-    i = 0
-    dictionaries.foreach { dict =>
-      (0 to dict.getMaxId).foreach { j =>
-        val ba = dict.decodeToBinary(j).getBytes
-        charBuf.setBytes(offsetBuf.getInt(i * 4L), ba, 0, ba.length)
-        i += 1
-      }
-    }
-
-    val dictVector = new HostColumnVector(DType.STRING, rowNum, Optional.of(0L),
-      charBuf, null, offsetBuf, new util.ArrayList[HostColumnVectorCore]())
-    logInfo(s"Built the HostDictVector for Column(${descriptor.getPath.mkString(".")}): " +
-      s"${dictVector.getRowCount}rows/${charBuf.getLength}bytes")
-
-    DictLatMatPatch(dictVector, pageOffsets.toArray)
   }
 
   private val ccPageReader: Class[_] = {

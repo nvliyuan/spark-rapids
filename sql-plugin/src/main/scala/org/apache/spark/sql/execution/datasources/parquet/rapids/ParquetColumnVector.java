@@ -58,10 +58,10 @@ final class ParquetColumnVector {
 			boolean isTopLevel,
 			int maxRepetitiveDefLevel,
 			Object defaultValue,
-			boolean dictLateMaterialize) {
+			boolean containsLatMatColumn) {
 
 		DataType sparkType = column.sparkType();
-		if (!dictLateMaterialize && !sparkType.sameType(vector.dataType())) {
+		if (!containsLatMatColumn && !sparkType.sameType(vector.dataType())) {
 			throw new IllegalArgumentException("Spark type: " + sparkType +
 					" doesn't match the type: " + vector.dataType() + " in column vector");
 		}
@@ -122,7 +122,7 @@ final class ParquetColumnVector {
 				ParquetColumnVector childCv = new ParquetColumnVector(column.children().apply(i),
 						vector.getChild(i), capacity, missingColumns, false,
 						childMaxRepetitiveDefLevel, null,
-						false);
+						containsLatMatColumn);
 				children.add(childCv);
 
 
