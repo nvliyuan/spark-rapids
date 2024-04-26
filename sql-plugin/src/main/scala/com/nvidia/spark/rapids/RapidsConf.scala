@@ -720,6 +720,19 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createWithDefault("0")
 
+  val PROFILE_FLUSH_PERIOD_MILLIS = conf("spark.rapids.profile.flushPeriodMillis")
+    .doc("Specifies the time period in milliseconds to flush profile records. " +
+      "A value <= 0 will disable time period flushing.")
+    .internal()
+    .integerConf
+    .createWithDefault(0)
+
+  val PROFILE_WRITE_BUFFER_SIZE = conf("spark.rapids.profile.writeBufferSize")
+    .doc("Buffer size to use when writing profile records.")
+    .internal()
+    .bytesConf(ByteUnit.BYTE)
+    .createWithDefault(1024 * 1024)
+
   // ENABLE/DISABLE PROCESSING
 
   val SQL_ENABLED = conf("spark.rapids.sql.enabled")
@@ -2391,6 +2404,10 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val profilePath: Option[String] = get(PROFILE_PATH)
 
   lazy val profileExecutors: String = get(PROFILE_EXECUTORS)
+
+  lazy val profileFlushPeriodMillis: Int = get(PROFILE_FLUSH_PERIOD_MILLIS)
+
+  lazy val profileWriteBufferSize: Long = get(PROFILE_WRITE_BUFFER_SIZE)
 
   lazy val isSqlEnabled: Boolean = get(SQL_ENABLED)
 
