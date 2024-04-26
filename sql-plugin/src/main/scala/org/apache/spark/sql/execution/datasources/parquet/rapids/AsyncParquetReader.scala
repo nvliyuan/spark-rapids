@@ -32,6 +32,7 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{AutoCloseableAttemptSplit
 import org.apache.hadoop.conf.Configuration
 import org.apache.parquet.{HadoopReadOptions, VersionParser}
 import org.apache.parquet.VersionParser.ParsedVersion
+import org.apache.parquet.bytes.DirectByteBufferAllocator
 import org.apache.parquet.column.page.PageReadStore
 import org.apache.parquet.hadoop.ParquetFileReader
 import org.apache.parquet.schema.MessageType
@@ -96,6 +97,7 @@ class AsyncParquetReader(
     val options = HadoopReadOptions.builder(conf)
       .withRange(offset, offset + len)
       .withCodecFactory(new ParquetCodecFactory(conf, 0))
+      .withAllocator(new DirectByteBufferAllocator)
       .build()
     val bufferFile = new HMBInputFile(fileBuffer, length = Some(offset + len))
     val reader = new ParquetFileReader(bufferFile, options)

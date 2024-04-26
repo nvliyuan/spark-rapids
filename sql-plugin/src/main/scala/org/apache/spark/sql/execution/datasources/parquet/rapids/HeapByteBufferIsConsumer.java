@@ -22,35 +22,21 @@ import org.apache.spark.sql.execution.vectorized.rapids.RapidsWritableColumnVect
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.Iterator;
-import java.util.List;
 
-public class MultiByteBuffersConsumer
-{
-
-	Iterator<ByteBuffer> iterator;
-	ByteBuffer current = null;
+public class HeapByteBufferIsConsumer extends ByteBufferIsConsumer {
 
 	// Reference of underlying data structure of HeapByteBuffer, since we assume the BIS is
 	// backed by the HeapByteBuffer
 	byte[] hb;
 	int arrayOffset;
 
-	public MultiByteBuffersConsumer(ByteBufferInputStream bis) {
-		List<ByteBuffer> buffers = bis.remainingBuffers();
-		if (buffers.size() > 1) {
-			System.err.printf("create a MultiByteBuffersConsumer with %d buffers\n", buffers.size());
-		}
-		iterator = buffers.iterator();
-		if (iterator.hasNext()) {
-			pointToNextBuffer();
-		}
+	public HeapByteBufferIsConsumer(Iterator<ByteBuffer> bufferIterator) {
+		super(bufferIterator);
 	}
 
-	private void pointToNextBuffer() {
-		current = iterator.next();
-		current.order(ByteOrder.LITTLE_ENDIAN);
+	protected void pointToNextBuffer() {
+		super.pointToNextBuffer();
 		assert current.hasArray();
 		hb = current.array();
 		arrayOffset = current.arrayOffset();
@@ -64,6 +50,10 @@ public class MultiByteBuffersConsumer
 			if (!current.hasRemaining()) pointToNextBuffer();
 
 			int size = Math.min(remaining, current.remaining());
+			// TODO: handle buffer tails separately, when there are multiple buffers
+			if (size >> 2 << 2 != size) {
+				throw new RuntimeException("Will support the special handling of buffer tails, when there are multiple buffers");
+			}
 			int srcOffset = this.arrayOffset + current.position();
 			int sizeInRow = size >> 2;
 			c.putIntsLittleEndian(tgtOffset, sizeInRow, hb, srcOffset);
@@ -81,6 +71,10 @@ public class MultiByteBuffersConsumer
 			if (!current.hasRemaining()) pointToNextBuffer();
 
 			int size = Math.min(remaining, current.remaining());
+			// TODO: handle buffer tails separately, when there are multiple buffers
+			if (size >> 3 << 3 != size) {
+				throw new RuntimeException("Will support the special handling of buffer tails, when there are multiple buffers");
+			}
 			int srcOffset = this.arrayOffset + current.position();
 			int sizeInRow = size >> 3;
 			c.putLongsLittleEndian(tgtOffset, sizeInRow, hb, srcOffset);
@@ -98,6 +92,10 @@ public class MultiByteBuffersConsumer
 			if (!current.hasRemaining()) pointToNextBuffer();
 
 			int size = Math.min(remaining, current.remaining());
+			// TODO: handle buffer tails separately, when there are multiple buffers
+			if (size >> 2 << 2 != size) {
+				throw new RuntimeException("Will support the special handling of buffer tails, when there are multiple buffers");
+			}
 			int srcOffset = this.arrayOffset + current.position();
 			int sizeInRow = size >> 2;
 			c.putFloatsLittleEndian(tgtOffset, sizeInRow, hb, srcOffset);
@@ -115,6 +113,10 @@ public class MultiByteBuffersConsumer
 			if (!current.hasRemaining()) pointToNextBuffer();
 
 			int size = Math.min(remaining, current.remaining());
+			// TODO: handle buffer tails separately, when there are multiple buffers
+			if (size >> 3 << 3 != size) {
+				throw new RuntimeException("Will support the special handling of buffer tails, when there are multiple buffers");
+			}
 			int srcOffset = this.arrayOffset + current.position();
 			int sizeInRow = size >> 3;
 			c.putDoublesLittleEndian(tgtOffset, sizeInRow, hb, srcOffset);
@@ -247,17 +249,6 @@ public class MultiByteBuffersConsumer
 		while (targetOffset < len);
 
 		return Binary.fromConstantByteArray(target);
-	}
-
-	public void advance(long sizeInByte) {
-		long remaining = sizeInByte;
-		while (remaining > 0) {
-			if (!current.hasRemaining()) pointToNextBuffer();
-
-			int batchSize = (remaining >= current.remaining()) ? current.remaining() : (int) remaining;
-			current.position(current.position() + batchSize);
-			remaining -= batchSize;
-		}
 	}
 
 }

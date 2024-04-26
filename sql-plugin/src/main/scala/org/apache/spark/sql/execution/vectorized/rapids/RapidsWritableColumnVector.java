@@ -505,7 +505,34 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 		return result;
 	}
 
-	public void putBytesUnsafely(int rowId, HostMemoryBuffer buffer, int offset, int length) {
+	// Append fixed-width elements directly from UnsafeMemory (such as DirectByteBuffer)
+	public void putFixedLengthElementsUnsafely(int rowId, long srcOffset, long copySize, int bitWidth) {
+		assert copySize >> bitWidth << bitWidth == copySize : "copySize is not aligned to bitWidth";
+
+		rowGroupIndex += (int) (copySize >> bitWidth);
+		rowId += currentRowGroupOffset;
+
+		UnsafeMemoryUtils.copyMemory(
+				null,
+				srcOffset,
+				null,
+				data.getAddress() + ((long) rowId << bitWidth),
+				copySize);
+	}
+
+	public void commitStringAppend(int rowId, int prevOffset, int curLength) {
+		rowGroupIndex++;
+		rowId += currentRowGroupOffset;
+		prevOffset += rowGroupStringOffset;
+
+		for (int i = lastCharRowId + 1; i < rowId; ++i) {
+			charOffsets.setInt((i + 1) * 4L, prevOffset);
+		}
+		charOffsets.setInt((rowId + 1) * 4L, prevOffset + curLength);
+		lastCharRowId = rowId;
+	}
+
+	public void copyStringFromOther(int rowId, HostMemoryBuffer buffer, int offset, int length) {
 		rowGroupIndex++;
 		rowId += currentRowGroupOffset;
 
@@ -539,18 +566,6 @@ public class RapidsWritableColumnVector extends WritableColumnVector {
 			charOffsets.setInt((i + 1) * 4L, globalOffset);
 		}
 		charOffsets.setInt((rowId + 1) * 4L, globalOffset + length);
-		lastCharRowId = rowId;
-	}
-
-	public void commitStringAppend(int rowId, int prevOffset, int curLength) {
-		rowGroupIndex++;
-		rowId += currentRowGroupOffset;
-		prevOffset += rowGroupStringOffset;
-
-		for (int i = lastCharRowId + 1; i < rowId; ++i) {
-			charOffsets.setInt((i + 1) * 4L, prevOffset);
-		}
-		charOffsets.setInt((rowId + 1) * 4L, prevOffset + curLength);
 		lastCharRowId = rowId;
 	}
 

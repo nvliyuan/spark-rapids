@@ -31,7 +31,7 @@ import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
  */
 public class VectorizedPlainValuesReader extends ValuesReader implements VectorizedValuesReader {
 
-	private MultiByteBuffersConsumer consumer = null;
+	private ByteBufferIsConsumer consumer = null;
 
 	// Only used for booleans.
 	private int bitOffset;
@@ -41,8 +41,8 @@ public class VectorizedPlainValuesReader extends ValuesReader implements Vectori
 	}
 
 	@Override
-	public void initFromPage(int valueCount, ByteBufferInputStream in) throws IOException {
-		consumer = new MultiByteBuffersConsumer(in);
+	public void initFromPage(int valueCount, ByteBufferInputStream in) {
+		consumer = ByteBufferIsConsumer.create(in);
 	}
 
 	@Override
