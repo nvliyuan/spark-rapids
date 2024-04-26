@@ -799,7 +799,7 @@ public class ParquetVectorUpdaterFactory {
 			OffHeapBinaryDictionary offHeapDict = (OffHeapBinaryDictionary) dictionary;
 			int[] dctOff = offHeapDict.getOffsets();
 			int id = dictionaryIds.getDictId(offset);
-			cv.putBytesUnsafely(offset, offHeapDict.getData(), dctOff[id], dctOff[id + 1] - dctOff[id]);
+			cv.copyStringFromOther(offset, offHeapDict.getData(), dctOff[id], dctOff[id + 1] - dctOff[id]);
 		}
 	}
 
