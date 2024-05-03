@@ -720,6 +720,15 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createWithDefault("0")
 
+  val PROFILE_COMPRESSION = conf("spark.rapids.profile.compression")
+    .doc("Specifies the compression codec to use when writing profile data, one of " +
+      "zstd or none")
+    .internal()
+    .stringConf
+    .transform(_.toLowerCase(java.util.Locale.ROOT))
+    .checkValues(Set("zstd", "none"))
+    .createWithDefault("zstd")
+
   val PROFILE_FLUSH_PERIOD_MILLIS = conf("spark.rapids.profile.flushPeriodMillis")
     .doc("Specifies the time period in milliseconds to flush profile records. " +
       "A value <= 0 will disable time period flushing.")
@@ -2404,6 +2413,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val profilePath: Option[String] = get(PROFILE_PATH)
 
   lazy val profileExecutors: String = get(PROFILE_EXECUTORS)
+
+  lazy val profileCompression: String = get(PROFILE_COMPRESSION)
 
   lazy val profileFlushPeriodMillis: Int = get(PROFILE_FLUSH_PERIOD_MILLIS)
 
