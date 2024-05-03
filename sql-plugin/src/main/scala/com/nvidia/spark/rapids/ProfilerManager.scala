@@ -24,6 +24,8 @@ import org.apache.hadoop.fs.Path
 
 import org.apache.spark.api.plugin.PluginContext
 import org.apache.spark.internal.Logging
+import org.apache.spark.io.CompressionCodec
+import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.util.SerializableConfiguration
 
 object ProfilerManager extends Logging {
@@ -35,7 +37,11 @@ object ProfilerManager extends Logging {
       val executorId = pluginCtx.executorID()
       if (shouldProfile(executorId, conf)) {
         logInfo("Starting profiler")
-        val w = new ProfileWriter(pluginCtx, pathPrefix)
+        val codec = conf.profileCompression match {
+          case "none" => None
+          case c => Some(TrampolineUtil.createCodec(pluginCtx.conf(), c))
+        }
+        val w = new ProfileWriter(pluginCtx, pathPrefix, codec)
         Profiler.init(w, conf.profileWriteBufferSize, conf.profileFlushPeriodMillis)
         Some(w)
       } else {
@@ -59,14 +65,15 @@ object ProfilerManager extends Logging {
 
 class ProfileWriter(
     val pluginCtx: PluginContext,
-    profilePathPrefix: String) extends Profiler.DataWriter {
+    profilePathPrefix: String,
+    codec: Option[CompressionCodec]) extends Profiler.DataWriter {
   private val executorId = pluginCtx.executorID()
-  private val outPath = getOutputPath(profilePathPrefix)
-  private val out = openOutput()
+  private val outPath = getOutputPath(profilePathPrefix, codec)
+  private val out = openOutput(codec)
   private var isClosed = false
 
   override def write(data: ByteBuffer): Unit = {
-    while (data.hasRemaining()) {
+    while (data.hasRemaining) {
       out.write(data)
     }
   }
@@ -88,16 +95,19 @@ class ProfileWriter(
     }
   }
 
-  private def getOutputPath(prefix: String): Path = {
+  private def getOutputPath(prefix: String, codec: Option[CompressionCodec]): Path = {
     val parentDir = new Path(prefix)
-    new Path(parentDir, s"rapids-profile-$getAppId-$executorId.bin")
+    val suffix = codec.map(c => "." + TrampolineUtil.getCodecShortName(c.getClass.getName))
+      .getOrElse("")
+    new Path(parentDir, s"rapids-profile-$getAppId-$executorId.bin$suffix")
   }
 
-  private def openOutput(): WritableByteChannel = {
+  private def openOutput(codec: Option[CompressionCodec]): WritableByteChannel = {
     val hadoopConf = pluginCtx.ask(ProfileStartMsg(executorId, outPath.toString))
       .asInstanceOf[SerializableConfiguration].value
     val fs = outPath.getFileSystem(hadoopConf)
-    val outStream = fs.create(outPath, false)
+    val fsStream = fs.create(outPath, false)
+    val outStream = codec.map(_.compressedOutputStream(fsStream)).getOrElse(fsStream)
     Channels.newChannel(outStream)
   }
 }
