@@ -474,6 +474,17 @@ def test_regexp_rlike_rewrite_optimization_str_dig():
                 'regexp_like(a, "[0-9]{4,}")',
                 'regexp_like(a, "abcd([0-9]{5})")'),
         conf=_regexp_conf)
+    
+# [\\u4e00-\\u9fa5]+
+
+@pytest.mark.skipif(is_before_spark_320(), reason='regexp_like is synonym for RLike starting in Spark 3.2.0')
+def test_regexp_rlike_rewrite_optimization_chinese():
+    gen = mk_str_gen('[0-9]{0,2}([英伟达]{0,3})?[a-z]{0,2}')
+    assert_gpu_and_cpu_are_equal_collect(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
+                'a',
+                'regexp_like(a, "[\\u4e00-\\u9fa5]+")'),
+        conf=_regexp_conf)
 
 def test_regexp_replace_character_set_negated():
     gen = mk_str_gen('[abcd]{0,3}[\r\n]{0,2}[abcd]{0,3}')
@@ -594,6 +605,7 @@ def test_character_classes():
             ),
         conf=_regexp_conf)
 
+@datagen_overrides(seed=0, reason="https://github.com/NVIDIA/spark-rapids/issues/10641")
 def test_regexp_choice():
     gen = mk_str_gen('[abcd]{1,3}[0-9]{1,3}[abcd]{1,3}[ \n\t\r]{0,2}')
     assert_gpu_and_cpu_are_equal_collect(
@@ -617,7 +629,7 @@ def test_regexp_hexadecimal_digits():
     gen = mk_str_gen(
         '[abcd]\\\\x00\\\\x7f\\\\x80\\\\xff\\\\x{10ffff}\\\\x{00eeee}[\\\\xa0-\\\\xb0][abcd]')
     assert_gpu_and_cpu_are_equal_collect(
-            lambda spark: unary_op_df(spark, gen, length=10).selectExpr(
+            lambda spark: unary_op_df(spark, gen).selectExpr(
                 'rlike(a, "\\\\x7f")',
                 'rlike(a, "\\\\x80")',
                 'rlike(a, "[\\\\xa0-\\\\xf0]")',

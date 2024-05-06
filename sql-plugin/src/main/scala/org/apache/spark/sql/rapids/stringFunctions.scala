@@ -1060,6 +1060,7 @@ object RegexprPart {
   case object End extends RegexprPart   // $
   case object Wildcard extends RegexprPart  // .* or (.*)
   case class Digits(from: Int, to: Int) extends RegexprPart  // [0-9]{a, b}
+  case object Chinese extends RegexprPart  // Chinese characters  [\u4e00-\u9fa5]+
   case class Fixstring(name: String) extends RegexprPart // normal string without special characters
   case class Regexpr(value: String) extends RegexprPart  // other strings
 }
@@ -1096,6 +1097,8 @@ class GpuRLikeMeta(
           Wildcard :: parseRegexToParts(s.substring(4))
         case s if s.endsWith("(.*)") => 
           parseRegexToParts(s.substring(0, s.length - 4)) :+ Wildcard
+        case s if s.startsWith("[\u4e00-\u9fa5]+") => 
+          parseRegexToParts(s.substring(0, s.length - 6)) :+ Chinese
         case s if s.endsWith("([0-9]{5})") => 
           parseRegexToParts(s.substring(0, s.length - 10)) :+ Digits(5, 5)
         case s if s.endsWith("[0-9]{4,}") => 
@@ -1125,15 +1128,20 @@ class GpuRLikeMeta(
         case Fixstring(s) :: List(End) => {
           GpuEndsWith(lhs, GpuLiteral(s, StringType))
         }
+        case Chinese :: rest 
+            if rest == List() || rest.forall(_ == Wildcard) => {
+          // println(s"!!!GpuStringDigits chinese")
+          GpuStringDigits(lhs, GpuLiteral("", StringType), 1, 19968, 40869)
+        } 
         case Digits(from, _) :: rest 
             if rest == List() || rest.forall(_ == Wildcard) => {
-          // println(s"!!!GpuStringDigits1: $from")
-          GpuStringDigits(lhs, GpuLiteral("", StringType), from)
+          // println(s"!!!GpuStringDigits1")
+          GpuStringDigits(lhs, GpuLiteral("", StringType), from, 48, 57)
         } 
         case Fixstring(s) :: Digits(from, _) :: rest 
             if rest == List() || rest.forall(_ == Wildcard) => {
-          // println(s"!!!GpuStringDigits2: $s, $from")
-          GpuStringDigits(lhs, GpuLiteral(s, StringType), from)
+          // println(s"!!!GpuStringDigits2")
+          GpuStringDigits(lhs, GpuLiteral(s, StringType), from, 48, 57)
         } 
         case Fixstring(s) :: rest
             if rest == List() || rest.forall(_ == Wildcard) => {
@@ -1217,7 +1225,7 @@ class GpuRLikeMeta(
     }
 }
 
-case class GpuStringDigits(left: Expression, right: Expression, from: Int)
+case class GpuStringDigits(left: Expression, right: Expression, from: Int, start: Int, end: Int)
   extends GpuBinaryExpressionArgsAnyScalar with ImplicitCastInputTypes with NullIntolerant {
 
   override def dataType: DataType = BooleanType
@@ -1225,7 +1233,7 @@ case class GpuStringDigits(left: Expression, right: Expression, from: Int)
   override def inputTypes: Seq[AbstractDataType] = Seq(StringType, StringType)
 
   override def doColumnar(lhs: GpuColumnVector, rhs: GpuScalar): ColumnVector = {
-    StringDigitsPattern.stringDigitsPattern(lhs.getBase, rhs.getBase, from)
+    StringDigitsPattern.stringDigitsPattern(lhs.getBase, rhs.getBase, from, start, end)
   }
 
   override def doColumnar(numRows: Int, lhs: GpuScalar, rhs: GpuScalar): ColumnVector = {
