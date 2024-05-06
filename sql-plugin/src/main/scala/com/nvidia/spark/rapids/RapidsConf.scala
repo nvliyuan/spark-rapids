@@ -902,12 +902,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
       .booleanConf
       .createWithDefault(true)
 
-  val ENABLE_RLIKE_REGEX_REWRITE = conf("spark.rapids.sql.rLikeRegexRewrite.enabled")
-      .doc("Enable the optimization to rewrite rlike regex to contains in some cases.")
-      .internal()
-      .stringConf
-      .createWithDefault("new")
-
   val ENABLE_GETJSONOBJECT_LEGACY = conf("spark.rapids.sql.getJsonObject.legacy.enabled")
       .doc("When set to true, the get_json_object function will use the legacy implementation " +
           "on the GPU. The legacy implementation is faster than the current implementation, but " +
@@ -1522,38 +1516,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
-  val PARQUET_HYBRID_SCAN_MODE = conf("spark.rapids.sql.parquet.scan.hybridMode")
-    .doc("The execution mode of hybrid parquet scan. There are 3 modes: GPU_ONLY, disable " +
-      "hybrid scan (the default mode); CPU_ONLY, only decode data via CPU; DeviceFirst, run " +
-      "decode tasks on CPUs if GPU resources are not available.")
-    .internal()
-    .stringConf
-    .createWithDefault("GPU_ONLY")
-
-  val PARQUET_HOST_SCAN_PARALLELISM = conf("spark.rapids.sql.parquet.scan.hostParallelism")
-    .doc("The max concurrent capacity for host parquet scan(decode) tasks")
-    .internal()
-    .integerConf
-    .createWithDefault(0)
-
-  val PARQUET_HOST_SCAN_BATCH_SIZE_BYTES = conf("spark.rapids.sql.parquet.scan.hostBatchSizeBytes")
-    .doc("Similar to spark.rapids.sql.batchSizeBytes, but it is only for decode tasks run on CPUs")
-    .internal()
-    .integerConf
-    .createWithDefault(1024 * 1024 * 128)
-
-  val PARQUET_HOST_SCAN_ASYNC = conf("spark.rapids.sql.parquet.scan.async")
-    .doc("Whether run host parquet decode tasks asynchronously or not")
-    .internal()
-    .booleanConf
-    .createWithDefault(false)
-
-  val PARQUET_SCAN_DICT_LATE_MAT = conf("spark.rapids.sql.parquet.scan.enableDictLateMat")
-    .doc("Whether pushing down binary dicts onto GPU and materializing via GPU or not")
-    .internal()
-    .booleanConf
-    .createWithDefault(false)
-
   val ORC_DEBUG_DUMP_PREFIX = conf("spark.rapids.sql.orc.debug.dumpPrefix")
     .doc("A path prefix where ORC split file data is dumped for debugging.")
     .internal()
@@ -1811,13 +1773,15 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .integerConf
         .createWithDefault(20)
 
-  val SHUFFLE_ENABLE_PADDING_PARTITION =
-    conf("spark.rapids.shuffle.paddingPartition.enabled")
-        .doc("Enable padding partition to avoid the expensive alignment of validity buffer " +
-            "during serializing nullable column vectors for shuffle write")
-        .internal()
-        .booleanConf
-        .createWithDefault(false)
+  val SHUFFLE_WRITER_GPU_SERIALIZING =
+    conf("spark.rapids.shuffle.serializeOnGpu.enabled")
+      .doc("When true, the batch serializing for Shuffle will run on GPU. " +
+        "It requires making sure the shuffle writer currently being used is compatible " +
+        "with this GPU serializing.")
+      .internal()
+      .startupOnly()
+      .booleanConf
+      .createWithDefault(false)
 
   // ALLUXIO CONFIGS
   val ALLUXIO_MASTER = conf("spark.rapids.alluxio.master")
@@ -2573,16 +2537,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val parquetDebugDumpAlways: Boolean = get(PARQUET_DEBUG_DUMP_ALWAYS)
 
-  lazy val parquetScanHybridMode: String = get(PARQUET_HYBRID_SCAN_MODE)
-
-  lazy val parquetScanHostParallelism: Int = get(PARQUET_HOST_SCAN_PARALLELISM)
-
-  lazy val parquetScanHostBatchSizeBytes: Int = get(PARQUET_HOST_SCAN_BATCH_SIZE_BYTES)
-
-  lazy val parquetScanHostAsync: Boolean = get(PARQUET_HOST_SCAN_ASYNC)
-
-  lazy val parquetScanEnableDictLateMat: Boolean = get(PARQUET_SCAN_DICT_LATE_MAT)
-
   lazy val orcDebugDumpPrefix: Option[String] = get(ORC_DEBUG_DUMP_PREFIX)
 
   lazy val orcDebugDumpAlways: Boolean = get(ORC_DEBUG_DUMP_ALWAYS)
@@ -2634,8 +2588,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val isProjectAstEnabled: Boolean = get(ENABLE_PROJECT_AST)
 
   lazy val isTieredProjectEnabled: Boolean = get(ENABLE_TIERED_PROJECT)
-
-  lazy val isRlikeRegexRewriteEnabled: String = get(ENABLE_RLIKE_REGEX_REWRITE)
 
   lazy val isLegacyGetJsonObjectEnabled: Boolean = get(ENABLE_GETJSONOBJECT_LEGACY)
 
@@ -2838,7 +2790,7 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
 
-  lazy val shuffleEnablePaddingPartition: Boolean = get(SHUFFLE_ENABLE_PADDING_PARTITION)
+  lazy val isSerializingOnGpu: Boolean = get(SHUFFLE_WRITER_GPU_SERIALIZING)
 
   def isUCXShuffleManagerMode: Boolean =
     RapidsShuffleManagerMode
