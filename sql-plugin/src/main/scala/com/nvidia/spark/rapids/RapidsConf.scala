@@ -1813,6 +1813,16 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .booleanConf
         .createWithDefault(false)
 
+  val SHUFFLE_WRITER_GPU_SERIALIZING =
+    conf("spark.rapids.shuffle.serializeOnGpu.enabled")
+      .doc("When true, the batch serializing for Shuffle will run on GPU. " +
+        "It requires making sure the shuffle writer currently being used is compatible " +
+        "with this GPU serializing.")
+      .internal()
+      .startupOnly()
+      .booleanConf
+      .createWithDefault(false)
+
   // ALLUXIO CONFIGS
   val ALLUXIO_MASTER = conf("spark.rapids.alluxio.master")
     .doc("The Alluxio master hostname. If not set, read Alluxio master URL from " +
@@ -2832,6 +2842,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val shuffleMultiThreadedWriterThreads: Int = get(SHUFFLE_MULTITHREADED_WRITER_THREADS)
 
   lazy val shuffleMultiThreadedReaderThreads: Int = get(SHUFFLE_MULTITHREADED_READER_THREADS)
+
+  lazy val isSerializingOnGpu: Boolean = get(SHUFFLE_WRITER_GPU_SERIALIZING)
 
   lazy val shuffleEnablePaddingPartition: Boolean = get(SHUFFLE_ENABLE_PADDING_PARTITION)
 
