@@ -71,9 +71,7 @@ trait GpuPartitioning extends Partitioning {
     if (_serializingOnGPU) {
       table =>
         withResource(new NvtxRange("Table to Host", NvtxColor.BLUE)) { _ =>
-          withResource(table) { _ =>
-            PackedTableHostColumnVector.from(table)
-          }
+          PackedTableHostColumnVector.from(table)
         }
     } else {
       GpuCompressedColumnVector.from
