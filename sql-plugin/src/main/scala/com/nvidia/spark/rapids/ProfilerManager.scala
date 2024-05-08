@@ -59,7 +59,8 @@ object ProfilerManager extends Logging {
   }
 
   private def shouldProfile(executorId: String, conf: RapidsConf): Boolean = {
-    conf.profileExecutors.split(',').toSet.contains(executorId)
+    val matcher = new RangeConfMatcher(conf, RapidsConf.PROFILE_EXECUTORS)
+    matcher.contains(executorId)
   }
 }
 
