@@ -492,13 +492,16 @@ class RapidsDriverPlugin extends DriverPlugin with Logging {
   }
 
   private def handleProfileMsg(m: ProfileMsg): AnyRef = m match {
-    case ProfileStartMsg(executorId, path) =>
-      logWarning(s"Executor $executorId started profiling to $path")
+    case ProfileInitMsg(executorId, path) =>
+      logWarning(s"Profiling: Executor $executorId initialized profiler, writing to $path")
       hadoopConf.map(c => new SerializableConfiguration(c)).getOrElse {
         throw new IllegalStateException("Hadoop configuration not set")
       }
+    case ProfileStatusMsg(executorId, msg) =>
+      logWarning(s"Profiling: Executor $executorId: $msg")
+      null
     case ProfileEndMsg(executorId, path) =>
-      logWarning(s"Executor $executorId ended profiling, data saved to $path")
+      logWarning(s"Profiling: Executor $executorId ended profiling, profile written to $path")
       null
     case _ =>
       throw new IllegalStateException(s"Unexpected profile msg: $m")
