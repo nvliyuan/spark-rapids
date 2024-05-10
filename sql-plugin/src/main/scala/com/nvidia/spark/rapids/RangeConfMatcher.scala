@@ -48,6 +48,12 @@ class RangeConfMatcher(configKey: String, configValue: Option[String]) {
   val isEmpty: Boolean = stringSet.isEmpty && intRanges.isEmpty
   val nonEmpty: Boolean = !isEmpty
 
+  def size: Int = {
+    stringSet.size + intRanges.map {
+      case (start, end) => end - start + 1
+    }.sum
+  }
+
   /** Returns true if the string value is in the configured values or ranges. */
   def contains(v: String): Boolean = {
     stringSet.contains(v) || (intRanges.nonEmpty && Try(v.toInt).map(checkRanges).getOrElse(false))
