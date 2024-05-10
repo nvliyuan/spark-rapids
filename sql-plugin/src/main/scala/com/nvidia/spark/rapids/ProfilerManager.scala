@@ -19,31 +19,55 @@ package com.nvidia.spark.rapids
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, WritableByteChannel}
 import java.util.{Timer, TimerTask}
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.{ConcurrentHashMap, RejectedExecutionException, TimeUnit}
+import java.util.regex.Pattern
+
+import scala.collection.mutable
 
 import com.nvidia.spark.rapids.jni.Profiler
 import org.apache.hadoop.fs.Path
+import org.apache.hadoop.ipc.CallerContext
 
+import org.apache.spark.{SparkContext, TaskContext}
 import org.apache.spark.api.plugin.PluginContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.io.CompressionCodec
+import org.apache.spark.scheduler.{SparkListener, SparkListenerJobEnd, SparkListenerStageCompleted}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.util.SerializableConfiguration
 
-object ProfilerManager extends Logging {
+object ProfilerOnExecutor extends Logging {
+  private val jobPattern = Pattern.compile("SPARK_.*_JId_([0-9]+).*")
   private var writer: Option[ProfileWriter] = None
   private var timeRanges: Option[Seq[(Long, Long)]] = None
+  private var jobRanges: RangeConfMatcher = null
+  private var stageRanges: RangeConfMatcher = null
+  // NOTE: Active sets are updated asynchronously, synchronize on ExecutorProfiler to access
+  private val activeJobs = mutable.HashSet[Int]()
+  private val activeStages = mutable.HashSet[Int]()
   private var timer: Option[Timer] = None
+  private var driverPollMillis = 0
   private val startTimestamp = System.nanoTime()
   private var isProfileActive = false
 
   def init(pluginCtx: PluginContext, conf: RapidsConf): Unit = {
     require(writer.isEmpty, "Already initialized")
     timeRanges = conf.profileTimeRangesSeconds.map(parseTimeRanges)
+    jobRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_JOBS)
+    stageRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_STAGES)
+    driverPollMillis = conf.profileDriverPollMillis
+    if (timeRanges.isDefined && (stageRanges.nonEmpty || jobRanges.nonEmpty)) {
+      throw new UnsupportedOperationException(
+        "Profiling with time ranges and stage or job ranges simultaneously is not supported")
+    }
     writer = conf.profilePath.flatMap { pathPrefix =>
       val executorId = pluginCtx.executorID()
       if (shouldProfile(executorId, conf)) {
         logInfo("Initializing profiler")
+        if (jobRanges.nonEmpty) {
+          // Need caller context enabled to get the job ID of a task on the executor
+          TrampolineUtil.getSparkHadoopUtilConf.setBoolean("hadoop.caller.context.enabled", true)
+        }
         val codec = conf.profileCompression match {
           case "none" => None
           case c => Some(TrampolineUtil.createCodec(pluginCtx.conf(), c))
@@ -58,6 +82,43 @@ object ProfilerManager extends Logging {
     writer.foreach { _ =>
       updateAndSchedule()
     }
+  }
+
+  def onTaskStart(): Unit = {
+    if (jobRanges.nonEmpty) {
+      val callerCtx = CallerContext.getCurrent
+      if (callerCtx != null) {
+        val m = jobPattern.matcher(callerCtx.getContext)
+        if (m.matches()) {
+          val jobId = m.group(1).toInt
+          if (jobRanges.contains(jobId)) {
+            synchronized {
+              activeJobs.add(jobId)
+              enable()
+            }
+          }
+        }
+      }
+    }
+    if (stageRanges.nonEmpty) {
+      val taskCtx = TaskContext.get
+      val stageId = taskCtx.stageId
+      if (stageRanges.contains(stageId)) {
+        synchronized {
+          activeStages.add(taskCtx.stageId)
+          enable()
+        }
+      }
+    }
+  }
+
+  def shutdown(): Unit = {
+    writer.foreach { w =>
+      timer.foreach(_.cancel())
+      Profiler.shutdown()
+      w.close()
+    }
+    writer = None
   }
 
   private def enable(): Unit = {
@@ -78,14 +139,6 @@ object ProfilerManager extends Logging {
         w.pluginCtx.send(ProfileStatusMsg(w.executorId, "profile stopped"))
       }
     }
-  }
-
-  def shutdown(): Unit = {
-    writer.foreach { w =>
-      Profiler.shutdown()
-      w.close()
-    }
-    writer = None
   }
 
   private def shouldProfile(executorId: String, conf: RapidsConf): Boolean = {
@@ -134,12 +187,50 @@ object ProfilerManager extends Logging {
               TimeUnit.NANOSECONDS.toMillis(start - now)
             }
             timer.get.schedule(new TimerTask {
-              override def run(): Unit = updateAndSchedule()
+              override def run(): Unit = try {
+                updateAndSchedule()
+              } catch {
+                case e: Exception =>
+                  logError(s"Error in profiler timer task", e)
+              }
             }, timerDelay)
         }
       }
+    } else if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
+      if (timer.isEmpty) {
+        timer = Some(new Timer("profiler timer", true))
+        timer.get.schedule(new TimerTask {
+          override def run(): Unit = try {
+            updateActiveFromDriver()
+          } catch {
+            case _: RejectedExecutionException | _: IllegalStateException =>
+              // These can be thrown on shutdown due to RPC tearing down before profiler does
+            case e: Exception =>
+              logError("Profiler timer task error: ", e)
+          }
+        }, driverPollMillis, driverPollMillis)
+      }
     } else {
       enable()
+    }
+  }
+
+  private def updateActiveFromDriver(): Unit = {
+    writer.foreach { w =>
+      val (jobs, stages) = synchronized {
+        (activeJobs.toArray, activeStages.toArray)
+      }
+      val (completedJobs, completedStages) = w.pluginCtx.ask(ProfileJobStageQueryMsg(jobs, stages))
+        .asInstanceOf[(Array[Int], Array[Int])]
+      if (completedJobs.nonEmpty || completedStages.nonEmpty) {
+        synchronized {
+          completedJobs.foreach(activeJobs.remove)
+          completedStages.foreach(activeStages.remove)
+          if (activeJobs.isEmpty && activeStages.isEmpty) {
+            disable()
+          }
+        }
+      }
     }
   }
 }
@@ -195,10 +286,72 @@ class ProfileWriter(
   }
 }
 
+object ProfilerOnDriver extends Logging {
+  private var hadoopConf: SerializableConfiguration = null
+  private var jobRanges: RangeConfMatcher = null
+  private var stageRanges: RangeConfMatcher = null
+  private val completedJobs = new ConcurrentHashMap[Int, Unit]()
+  private val completedStages = new ConcurrentHashMap[Int, Unit]()
+
+  def init(sc: SparkContext, conf: RapidsConf): Unit = {
+    // if no profile path, profiling is disabled and nothing to do
+    conf.profilePath.foreach { _ =>
+      hadoopConf = new SerializableConfiguration(sc.hadoopConfiguration)
+      jobRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_JOBS)
+      stageRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_STAGES)
+      if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
+        if (jobRanges.nonEmpty) {
+          // Need caller context enabled to get the job ID of a task on the executor
+          sc.getConf.set("hadoop.caller.context.enabled", "true")
+        }
+        sc.addSparkListener(Listener)
+      }
+    }
+  }
+
+  def handleMsg(m: ProfileMsg): AnyRef = m match {
+    case ProfileInitMsg(executorId, path) =>
+      logWarning(s"Profiling: Executor $executorId initialized profiler, writing to $path")
+      if (hadoopConf == null) {
+        throw new IllegalStateException("Hadoop configuration not set")
+      }
+      hadoopConf
+    case ProfileStatusMsg(executorId, msg) =>
+      logWarning(s"Profiling: Executor $executorId: $msg")
+      null
+    case ProfileJobStageQueryMsg(activeJobs, activeStages) =>
+      val filteredJobs = activeJobs.filter(j => completedJobs.containsKey(j))
+      val filteredStages = activeStages.filter(s => completedStages.containsKey(s))
+      (filteredJobs, filteredStages)
+    case ProfileEndMsg(executorId, path) =>
+      logWarning(s"Profiling: Executor $executorId ended profiling, profile written to $path")
+      null
+    case _ =>
+      throw new IllegalStateException(s"Unexpected profile msg: $m")
+  }
+
+  private object Listener extends SparkListener {
+    override def onJobEnd(jobEnd: SparkListenerJobEnd): Unit = {
+      val jobId = jobEnd.jobId
+      if (jobRanges.contains(jobId)) {
+        completedJobs.putIfAbsent(jobId, Unit)
+      }
+    }
+
+    override def onStageCompleted(stageCompleted: SparkListenerStageCompleted): Unit = {
+      val stageId = stageCompleted.stageInfo.stageId
+      if (stageRanges.contains(stageId)) {
+        completedStages.putIfAbsent(stageId, Unit)
+      }
+    }
+  }
+}
+
 trait ProfileMsg
 
 case class ProfileInitMsg(executorId: String, path: String) extends ProfileMsg
-
 case class ProfileStatusMsg(executorId: String, msg: String) extends ProfileMsg
-
+case class ProfileJobStageQueryMsg(
+    activeJobs: Array[Int],
+    activeStages: Array[Int]) extends ProfileMsg
 case class ProfileEndMsg(executorId: String, path: String) extends ProfileMsg
