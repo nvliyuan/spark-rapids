@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.{ScheduledExecutorService, ThreadPoolExecutor}
 
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
@@ -41,7 +41,7 @@ import org.apache.spark.sql.rapids.shims.DataTypeUtilsShim
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.storage.BlockManagerId
-import org.apache.spark.util.{ShutdownHookManager, Utils}
+import org.apache.spark.util.{ShutdownHookManager, ThreadUtils, Utils}
 
 object TrampolineUtil {
   def doExecuteBroadcast[T](child: SparkPlan): Broadcast[T] = child.doExecuteBroadcast()
@@ -226,8 +226,11 @@ object TrampolineUtil {
       prefix: String,
       maxThreadNumber: Int,
       keepAliveSeconds: Int): ThreadPoolExecutor = {
-    org.apache.spark.util.ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber,
-      keepAliveSeconds)
+    ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber, keepAliveSeconds)
+  }
+
+  def newDaemonSingleThreadScheduledExecutor(threadName: String): ScheduledExecutorService = {
+    ThreadUtils.newDaemonSingleThreadScheduledExecutor(threadName)
   }
 
   def postEvent(sc: SparkContext, sparkEvent: SparkListenerEvent): Unit = {
