@@ -46,6 +46,7 @@ object ProfilerOnExecutor extends Logging {
   private val activeJobs = mutable.HashSet[Int]()
   private val activeStages = mutable.HashSet[Int]()
   private var timer: Option[Timer] = None
+  private var isPollingDriver = false
   private var driverPollMillis = 0
   private val startTimestamp = System.nanoTime()
   private var isProfileActive = false
@@ -95,6 +96,7 @@ object ProfilerOnExecutor extends Logging {
             synchronized {
               activeJobs.add(jobId)
               enable()
+              startPollingDriver()
             }
           }
         }
@@ -107,6 +109,7 @@ object ProfilerOnExecutor extends Logging {
         synchronized {
           activeStages.add(taskCtx.stageId)
           enable()
+          startPollingDriver()
         }
       }
     }
@@ -197,21 +200,35 @@ object ProfilerOnExecutor extends Logging {
         }
       }
     } else if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
-      if (timer.isEmpty) {
-        timer = Some(new Timer("profiler timer", true))
-        timer.get.schedule(new TimerTask {
-          override def run(): Unit = try {
-            updateActiveFromDriver()
-          } catch {
-            case _: RejectedExecutionException | _: IllegalStateException =>
-              // These can be thrown on shutdown due to RPC tearing down before profiler does
-            case e: Exception =>
-              logError("Profiler timer task error: ", e)
-          }
-        }, driverPollMillis, driverPollMillis)
-      }
+      // nothing to do yet, profiling will start when tasks for targeted job/stage are seen
     } else {
       enable()
+    }
+  }
+
+  private def startPollingDriver(): Unit = {
+    if (!isPollingDriver) {
+      if (timer.isEmpty) {
+        timer = Some(new Timer("profiler timer", true))
+      }
+      timer.get.schedule(new TimerTask {
+        override def run(): Unit = try {
+          updateActiveFromDriver()
+        } catch {
+          case _: RejectedExecutionException | _: IllegalStateException =>
+          // These can be thrown on shutdown due to RPC tearing down before profiler does
+          case e: Exception =>
+            logError("Profiler timer task error: ", e)
+        }
+      }, driverPollMillis, driverPollMillis)
+      isPollingDriver = true
+    }
+  }
+
+  private def stopPollingDriver(): Unit = {
+    if (isPollingDriver) {
+      timer.foreach(_.cancel())
+      isPollingDriver = false
     }
   }
 
@@ -228,6 +245,7 @@ object ProfilerOnExecutor extends Logging {
           completedStages.foreach(activeStages.remove)
           if (activeJobs.isEmpty && activeStages.isEmpty) {
             disable()
+            stopPollingDriver()
           }
         }
       }
