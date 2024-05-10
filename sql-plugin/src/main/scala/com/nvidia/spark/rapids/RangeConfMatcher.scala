@@ -22,19 +22,31 @@ import scala.util.Try
  * Determines if a value is in a comma-separated list of values and/or
  * hyphenated ranges provided by the user for a configuration setting.
  */
-class RangeConfMatcher(conf: RapidsConf, entry: ConfEntry[String]) {
-  private val (stringSet, intRanges) = {
-    val confVal = conf.get(entry)
-    val parts = confVal.split(',')
-    val (rangeParts, singleParts) = parts.partition(_.contains('-'))
-    val ranges = try {
-      rangeParts.map(RangeConfMatcher.parseRange)
-    } catch {
-      case e: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Invalid range settings for $entry: $confVal", e)
-    }
-    (singleParts.map(_.trim).toSet, ranges)
+class RangeConfMatcher(configKey: String, configValue: Option[String]) {
+  def this(conf: RapidsConf, entry: ConfEntry[String]) = {
+    this(entry.key, Some(conf.get(entry)))
   }
+
+  def this(conf: RapidsConf, entry: OptionalConfEntry[String]) = {
+    this(entry.key, conf.get(entry))
+  }
+
+  private val (stringSet, intRanges) = {
+    configValue.map { cv =>
+      val parts = cv.split(',')
+      val (rangeParts, singleParts) = parts.partition(_.contains('-'))
+      val ranges = try {
+        rangeParts.map(RangeConfMatcher.parseRange)
+      } catch {
+        case e: IllegalArgumentException =>
+          throw new IllegalArgumentException(s"Invalid range settings for $configKey: $cv", e)
+      }
+      (singleParts.map(_.trim).toSet, ranges)
+    }.getOrElse((Set.empty[String], Array.empty[(Int, Int)]))
+  }
+
+  val isEmpty: Boolean = stringSet.isEmpty && intRanges.isEmpty
+  val nonEmpty: Boolean = !isEmpty
 
   /** Returns true if the string value is in the configured values or ranges. */
   def contains(v: String): Boolean = {
