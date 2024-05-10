@@ -230,8 +230,9 @@ object ProfilerOnExecutor extends Logging {
       val (jobs, stages) = synchronized {
         (activeJobs.toArray, activeStages.toArray)
       }
-      val (completedJobs, completedStages) = w.pluginCtx.ask(ProfileJobStageQueryMsg(jobs, stages))
-        .asInstanceOf[(Array[Int], Array[Int])]
+      val (completedJobs, completedStages, allDone) =
+        w.pluginCtx.ask(ProfileJobStageQueryMsg(jobs, stages))
+          .asInstanceOf[(Array[Int], Array[Int], Boolean)]
       if (completedJobs.nonEmpty || completedStages.nonEmpty) {
         synchronized {
           completedJobs.foreach(activeJobs.remove)
@@ -241,6 +242,10 @@ object ProfilerOnExecutor extends Logging {
             stopPollingDriver()
           }
         }
+      }
+      if (allDone) {
+        logWarning("No further jobs or stages to profile, shutting down")
+        shutdown()
       }
     }
   }
@@ -300,9 +305,12 @@ class ProfileWriter(
 object ProfilerOnDriver extends Logging {
   private var hadoopConf: SerializableConfiguration = null
   private var jobRanges: RangeConfMatcher = null
+  private var numJobsToProfile: Long = 0L
   private var stageRanges: RangeConfMatcher = null
+  private var numStagesToProfile: Long = 0L
   private val completedJobs = new ConcurrentHashMap[Int, Unit]()
   private val completedStages = new ConcurrentHashMap[Int, Unit]()
+  private var isJobsStageProfilingComplete = false
 
   def init(sc: SparkContext, conf: RapidsConf): Unit = {
     // if no profile path, profiling is disabled and nothing to do
@@ -311,6 +319,8 @@ object ProfilerOnDriver extends Logging {
       jobRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_JOBS)
       stageRanges = new RangeConfMatcher(conf, RapidsConf.PROFILE_STAGES)
       if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
+        numJobsToProfile = jobRanges.size
+        numStagesToProfile = stageRanges.size
         if (jobRanges.nonEmpty) {
           // Need caller context enabled to get the job ID of a task on the executor
           sc.getConf.set("hadoop.caller.context.enabled", "true")
@@ -333,7 +343,7 @@ object ProfilerOnDriver extends Logging {
     case ProfileJobStageQueryMsg(activeJobs, activeStages) =>
       val filteredJobs = activeJobs.filter(j => completedJobs.containsKey(j))
       val filteredStages = activeStages.filter(s => completedStages.containsKey(s))
-      (filteredJobs, filteredStages)
+      (filteredJobs, filteredStages, isJobsStageProfilingComplete)
     case ProfileEndMsg(executorId, path) =>
       logWarning(s"Profiling: Executor $executorId ended profiling, profile written to $path")
       null
@@ -346,6 +356,8 @@ object ProfilerOnDriver extends Logging {
       val jobId = jobEnd.jobId
       if (jobRanges.contains(jobId)) {
         completedJobs.putIfAbsent(jobId, Unit)
+        isJobsStageProfilingComplete = completedJobs.size == numJobsToProfile &&
+          completedStages.size == numStagesToProfile
       }
     }
 
@@ -353,6 +365,8 @@ object ProfilerOnDriver extends Logging {
       val stageId = stageCompleted.stageInfo.stageId
       if (stageRanges.contains(stageId)) {
         completedStages.putIfAbsent(stageId, Unit)
+        isJobsStageProfilingComplete = completedJobs.size == numJobsToProfile &&
+          completedStages.size == numStagesToProfile
       }
     }
   }
@@ -362,7 +376,12 @@ trait ProfileMsg
 
 case class ProfileInitMsg(executorId: String, path: String) extends ProfileMsg
 case class ProfileStatusMsg(executorId: String, msg: String) extends ProfileMsg
+case class ProfileEndMsg(executorId: String, path: String) extends ProfileMsg
+
+// Reply is a tuple of:
+// - array of jobs that have completed
+// - array of stages that have completed
+// - boolean if there are no further jobs/stages to profile
 case class ProfileJobStageQueryMsg(
     activeJobs: Array[Int],
     activeStages: Array[Int]) extends ProfileMsg
-case class ProfileEndMsg(executorId: String, path: String) extends ProfileMsg
