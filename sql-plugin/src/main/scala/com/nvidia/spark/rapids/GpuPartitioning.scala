@@ -249,12 +249,13 @@ trait GpuPartitioning extends Partitioning {
       contiguousTables: Array[ContiguousTable]): Unit = {
     withResource(codec.createBatchCompressor(maxCompressionBatchSize,
         Cuda.DEFAULT_STREAM)) { compressor =>
-      // tracks batches with no data and the corresponding output index for the batch
+      // tracks batches with no data (no rows or all rows are null) and
+      // the corresponding output index for the batch.
       val emptyBatches = new ArrayBuffer[(ColumnarBatch, Int)]
 
       // add each table either to the batch to be compressed or to the empty batch tracker
       contiguousTables.zipWithIndex.foreach { case (ct, i) =>
-        if (ct.getRowCount == 0) {
+        if (ct.getBuffer.getLength == 0) {
           emptyBatches.append((toPackedBatch(ct), i))
         } else {
           compressor.addTableToCompress(ct)
