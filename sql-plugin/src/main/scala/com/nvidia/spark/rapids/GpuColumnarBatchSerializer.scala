@@ -146,7 +146,9 @@ private class GpuColumnarBatchSerializerInstance(dataSize: GpuMetric, serTime: G
       with Logging {
     private[this] val dOut = new DataOutputStream(new BufferedOutputStream(out))
     private[this] val tableSerializer = new SimpleTableSerializer()
-    onTaskCompletion(TaskContext.get())(tableSerializer.close())
+    Option(TaskContext.get()).foreach { tc =>
+      onTaskCompletion(tc)(tableSerializer.close())
+    }
 
     private lazy val serializeBatch: ColumnarBatch => Unit = if (isSerializedTable) {
       serializeGpuBatch
