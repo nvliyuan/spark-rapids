@@ -2274,6 +2274,42 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .integerConf
       .createWithDefault(1024)
 
+  /**
+   * refer to dev doc: `replay-exec.md`
+   * only supports "project", will supports "agg" later
+   */
+  val TEST_REPLAY_EXEC_TYPE =
+    conf("spark.rapids.sql.test.replay.exec.type")
+        .doc("Only for tests: Define the Exec type for dumping")
+        .internal()
+        .stringConf
+        .createWithDefault("")
+
+  val TEST_REPLAY_EXEC_DUMP_DIR =
+    conf("spark.rapids.sql.test.replay.exec.dumpDir")
+        .doc("Only for tests: Define the directory when dumping Exec runtime " +
+            "meta and column batch data")
+        .internal()
+        .stringConf
+        .createWithDefault("/tmp")
+
+
+
+  val TEST_REPLAY_EXEC_THRESHOLD_TIME_MS =
+    conf("spark.rapids.sql.test.replay.exec.threshold.timeMS")
+        .doc("Only for tests: Only dump the column bach when executing time against it " +
+            " exceeds this threshold time in MS")
+        .internal()
+        .integerConf
+        .createWithDefault(100)
+
+  val TEST_REPLAY_EXEC_FILTER_INCLUDE =
+    conf("spark.rapids.sql.test.replay.exec.filter.include")
+        .doc("Only for tests: Only dump when the Exec SQL contains this filter pattern")
+        .internal()
+        .stringConf
+        .createWithDefault("")
+
   private def printSectionHeader(category: String): Unit =
     println(s"\n### $category")
 
@@ -3082,6 +3118,15 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val testGetJsonObjectSavePath: Option[String] = get(TEST_GET_JSON_OBJECT_SAVE_PATH)
 
   lazy val testGetJsonObjectSaveRows: Int = get(TEST_GET_JSON_OBJECT_SAVE_ROWS)
+
+  lazy val testReplayExecDumpDir: String = get(TEST_REPLAY_EXEC_DUMP_DIR)
+
+  lazy val testReplayExecType: String = get(TEST_REPLAY_EXEC_TYPE)
+
+  lazy val testReplayExecThresholdTimeMS: Int = get(TEST_REPLAY_EXEC_THRESHOLD_TIME_MS)
+
+  lazy val testReplayExecFilterInclude: String = get(TEST_REPLAY_EXEC_FILTER_INCLUDE)
+
 
   private val optimizerDefaults = Map(
     // this is not accurate because CPU projections do have a cost due to appending values
