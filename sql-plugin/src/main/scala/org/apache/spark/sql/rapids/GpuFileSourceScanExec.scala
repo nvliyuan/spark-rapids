@@ -425,35 +425,7 @@ case class GpuFileSourceScanExec(
     GPU_DECODE_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_GPU_DECODE_TIME),
     BUFFER_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_BUFFER_TIME),
     FILTER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_FILTER_TIME)
-  ) ++ fileCacheMetrics ++ {
-    relation.fileFormat match {
-      case _: GpuReadParquetFileFormat if rapidsConf.parquetScanHybridMode != "GPU_ONLY" =>
-        Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
-          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME),
-          "filteredRowGroups" -> createMetric(DEBUG_LEVEL, "filtered row groups"),
-          "totalRowGroups" -> createMetric(DEBUG_LEVEL, "total row groups"),
-          "cpuDecodeBatches" -> createMetric(DEBUG_LEVEL, "CPU decode batches"),
-          "preloadH2DBatches" -> createMetric(DEBUG_LEVEL, "preload batches"),
-          "cpuDecodeRows" -> createMetric(DEBUG_LEVEL, "CPU decode rows"),
-          "cpuDecodeTime" -> createNanoTimingMetric(DEBUG_LEVEL, "CPU decode time"),
-          "hostVecToDeviceTime" -> createNanoTimingMetric(DEBUG_LEVEL, "host To device Time"),
-          "hybridPollTime" -> createNanoTimingMetric(DEBUG_LEVEL, "hybridPollTime"),
-          "waitAsyncDecode" -> createNanoTimingMetric(DEBUG_LEVEL, "waitTimeForAsyncCpuDecode"),
-          "preH2dGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL, "GPU wait time before H2D"),
-          "postH2dGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL, "GPU wait time after H2D"),
-          "decodeGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL, "GPU wait time for Decode"),
-        )
-      case _: GpuReadParquetFileFormat | _: GpuOrcFileFormat =>
-        Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
-          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME),
-          "filteredRowGroups" -> createMetric(DEBUG_LEVEL, "filtered row groups"),
-          "totalRowGroups" -> createMetric(DEBUG_LEVEL, "total row groups"),
-          "decodeGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL, "GPU wait time for Decode"),
-        )
-      case _ =>
-        Map.empty[String, GpuMetric]
-    }
-  } ++ {
+  ) ++ fileCacheMetrics ++ hybridScanMetrics ++ {
     // Tracking scan time has overhead, we can't afford to do it for each row, and can only do
     // it for each batch.
     if (supportsColumnar) {
@@ -475,6 +447,40 @@ case class GpuFileSourceScanExec(
     // File cache only supported on Parquet files for now.
     relation.fileFormat match {
       case _: GpuReadParquetFileFormat | _: GpuReadOrcFileFormat => createFileCacheMetrics()
+      case _ => Map.empty
+    }
+  }
+
+  private lazy val hybridScanMetrics: Map[String, GpuMetric] = {
+    relation.fileFormat match {
+      case _: GpuReadOrcFileFormat =>
+        Map(READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME),
+          WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_WRITE_BUFFER_TIME))
+      case _: GpuReadParquetFileFormat =>
+        val b = scala.collection.mutable.ArrayBuffer[(String, GpuMetric)]()
+        // Some additional metrics to inspect the performance issues of Parquet reading
+        b += READ_FS_TIME -> createNanoTimingMetric(DEBUG_LEVEL, DESCRIPTION_READ_FS_TIME)
+        b += WRITE_BUFFER_TIME -> createNanoTimingMetric(DEBUG_LEVEL,
+          DESCRIPTION_WRITE_BUFFER_TIME)
+        b += "filteredRowGroups" -> createMetric(DEBUG_LEVEL, "filtered row groups")
+        b += "totalRowGroups" -> createMetric(DEBUG_LEVEL, "total row groups")
+        b += "decodeGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL,
+          "GPU wait time for Decode")
+        // Metrics for HybridParquetScan
+        if (rapidsConf.parquetScanHybridMode != "GPU_ONLY") {
+          b += "cpuDecodeBatches" -> createMetric(DEBUG_LEVEL, "CPU decode batches")
+          b += "preloadH2DBatches" -> createMetric(DEBUG_LEVEL, "preload batches")
+          b += "cpuDecodeRows" -> createMetric(DEBUG_LEVEL, "CPU decode rows")
+          b += "cpuDecodeTime" -> createNanoTimingMetric(DEBUG_LEVEL, "CPU decode time")
+          b += "hostVecToDeviceTime" -> createNanoTimingMetric(DEBUG_LEVEL,
+            "host To device Time")
+          b += "hybridPollTime" -> createNanoTimingMetric(DEBUG_LEVEL, "hybridPollTime")
+          b += "waitAsyncDecode" -> createNanoTimingMetric(DEBUG_LEVEL,
+            "waitTimeForAsyncCpuDecode")
+          b += "preH2dGpuWait" -> createNanoTimingMetric(DEBUG_LEVEL,
+            "GPU wait time before H2D")
+        }
+        b.toMap
       case _ => Map.empty
     }
   }
