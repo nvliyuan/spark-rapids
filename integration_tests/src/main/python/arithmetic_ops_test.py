@@ -129,13 +129,6 @@ def test_subtraction(data_gen):
                 f.col('b') - f.lit(None).cast(data_type),
                 f.col('a') - f.col('b')))
 
-@pytest.mark.parametrize('data_gen', _arith_data_gens, ids=idfn)
-def test_my_test(data_gen):
-    assert_gpu_and_cpu_are_equal_collect(
-        lambda spark: binary_op_df(spark, data_gen).select(
-            f.col('a') + f.col('b')))
-
-
 @pytest.mark.parametrize('lhs', [byte_gen, short_gen, int_gen, long_gen, DecimalGen(6, 5),
     DecimalGen(6, 4), DecimalGen(5, 4), DecimalGen(5, 3), DecimalGen(4, 2), DecimalGen(3, -2),
     DecimalGen(16, 7), DecimalGen(19, 0), DecimalGen(30, 10)], ids=idfn)

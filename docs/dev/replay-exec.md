@@ -1,4 +1,4 @@
-This doc describes how to dump an Exec runtime meta and column batch data to a local directory,
+This doc describes how to dump an Exec runtime meta and column batch data to a directory,
 and replay the Exec with the dumped meta and data. When encountering a perf issue using this tool
 can dump the runtime meta/data and then replay. It will spend less time when collecting NSYS and 
 NCU information when replaying the dumped runtime meta/data.
@@ -12,27 +12,36 @@ mvn clean install -DskipTests -pl dist -am -DallowConventionalDistJar=true -Dbui
 ```
 
 ## enable dump
-e.g.: 
-```
-// specify the Exec for dumping, currently only supports `project` 
+This assumes that the RAPIDs Accelerator has already been enabled.   
+This feature is disabled by default.   
+Set the following configurations to enable this feature:   
+
+``` 
 spark.conf.set("spark.rapids.sql.test.replay.exec.type", "project")
-
-// specify the local dump directory, default value is "/tmp"
-// should first create this directory
-spark.conf.set("spark.rapids.sql.test.replay.exec.dumpDir", "/tmp/replay-exec")
-
-// Only dump the column bach when executing time against it exceeds this threshold time in MS
-spark.conf.set("spark.rapids.sql.test.replay.exec.threshold.timeMS", 100)
-
-// max dumping number of column batchs
-// Default value is 1  
-spark.conf.set("spark.rapids.sql.test.replay.exec.maxBatchNum", 1)
-
-// If sepcified, only dump when the Exec SQL contains this filter pattern
-// Default value is empty which means no filter
-// This example means enable dumping when Exec SQL contains "get_json_object"
-spark.conf.set("spark.rapids.sql.test.replay.exec.filter.include", "get_json_object")
 ```
+Default `type` value is empty which means do not dump.   
+Set this `type` to `project` if you want to dump Project Exec runtime data. Currently only support
+`project` and empty.
+
+```
+spark.conf.set("spark.rapids.sql.test.replay.exec.dumpDir", "file:/tmp")
+```
+Default value is `file:/tmp`.  
+specify the dump directory, e.g.: `file:/tmp/my-debug-path`.  
+This path should be a directory or someplace that we can create a directory to
+store files in. Remote path is supported e.g.: `hdfs://url:9000/path/to/save`
+
+```
+spark.conf.set("spark.rapids.sql.test.replay.exec.threshold.timeMS", 1000)
+```
+Default value is 1000MS.   
+Only dump the column batches when it's executing time exceeds threshold time. 
+
+```  
+spark.conf.set("spark.rapids.sql.test.replay.exec.batch.limit", 1)
+```
+This config defines the max dumping number of column batches.   
+Default value is 1.
 
 ## run a Spark job 
 This dumping only happens when GPU Exec is running, so should enable Spark-Rapids.
@@ -41,9 +50,9 @@ After the job is done, check the dump path will have files like:
 /tmp/replay-exec:
   - xxx_GpuTieredProject.meta      // this is serialized GPU Tiered Project case class  
   - xxx_cb_types.meta              // this is types for column batch
-  - xxx_cb_data_101656570.parquet  // this is data for column batch
+  - xxx_cb_data_0_101656570.parquet  // this is data for column batch
 ```
-The prefix `xxx` is the hash code for a specific Project Exec, this is used to distinct multiple
+The prefix `xxx` is the hash code for a specific Project Exec, this is used to distinguish multiple
 Project Execs.
 
 # Replay saved Exec runtime meta and data
@@ -59,7 +68,7 @@ export SPARK_HOME=path_to_spark_home_330
 ### Collect NSYS with replaying
 ```
 nsys profile $SPARK_HOME/bin/spark-submit \
-  --class com.nvidia.spark.rapids.ProjectExecReplayer \
+  --class com.nvidia.spark.rapids.test.ProjectExecReplayer \
   --conf spark.rapids.sql.explain=ALL \
   --master local[*] \
   --jars ${PLUGIN_JAR} \

@@ -16,11 +16,8 @@
 
 package com.nvidia.spark.rapids
 
-import java.io.{File, FileOutputStream}
-
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
-import scala.reflect.ClassTag
 
 import ai.rapids.cudf
 import ai.rapids.cudf._
@@ -32,17 +29,20 @@ import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRow
 import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims._
 
-import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, SparkEnv, TaskContext}
+import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, TaskContext}
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.physical.{Partitioning, RangePartitioning, SinglePartition, UnknownPartitioning}
 import org.apache.spark.sql.execution.{ProjectExec, SampleExec, SparkPlan}
 import org.apache.spark.sql.rapids.{GpuPartitionwiseSampledRDD, GpuPoissonSampler}
 import org.apache.spark.sql.rapids.execution.TrampolineUtil
+import org.apache.spark.sql.rapids.test.ReplayDumper
 import org.apache.spark.sql.types.{DataType, LongType}
 import org.apache.spark.sql.vectorized.{ColumnarBatch, ColumnVector}
+import org.apache.spark.util.SerializableConfiguration
 import org.apache.spark.util.random.BernoulliCellSampler
 
 class GpuProjectExecMeta(
@@ -68,7 +68,8 @@ class GpuProjectExecMeta(
         }
       }
     }
-    GpuProjectExec(gpuExprs, gpuChild)(useTieredProject = conf.isTieredProjectEnabled)
+    val testReplay = ReplayDumper.enabledReplayForProject(conf)
+    GpuProjectExec(gpuExprs, gpuChild, testReplay)(useTieredProject = conf.isTieredProjectEnabled)
   }
 }
 
@@ -372,9 +373,24 @@ case class GpuProjectExec(
    // serde: https://github.com/scala/scala/blob/2.12.x/src/library/scala/collection/
    //   immutable/List.scala#L516
    projectList: List[NamedExpression],
-   child: SparkPlan)(
+   child: SparkPlan,
+   dumpForReplay: Boolean // for testing purpose
+ )(
    useTieredProject : Boolean = false
  ) extends GpuProjectExecLike {
+
+  // for testing purpose; used by dumping for replay feature
+  private val replayDumperOpt: Option[ReplayDumper] = if (dumpForReplay) {
+    val spark = SparkSession.active
+    val hadoopConf = new SerializableConfiguration(spark.sparkContext.hadoopConfiguration)
+    val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key)
+    val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_MS.key).toInt
+    val batchLimit = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_BATCH_LIMIT.key).toInt
+    val projectHashCode = Math.abs(this.hashCode())
+    Some(ReplayDumper(hadoopConf, dumpDir, thresholdMS, batchLimit, projectHashCode))
+  } else {
+    None
+  }
 
   override def otherCopyArgs: Seq[AnyRef] =
     Seq[AnyRef](useTieredProject.asInstanceOf[java.lang.Boolean])
@@ -383,13 +399,6 @@ case class GpuProjectExec(
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
     OP_TIME -> createNanoTimingMetric(MODERATE_LEVEL, DESCRIPTION_OP_TIME))
-
-  private def serializeObject[T: ClassTag](savePath: String, obj: T): Unit = {
-    val byteBuff = SparkEnv.get.closureSerializer.newInstance().serialize[T](obj)
-    val fos = new FileOutputStream(savePath)
-    fos.write(byteBuff.array())
-    fos.close()
-  }
 
   override def internalDoExecuteColumnar(): RDD[ColumnarBatch] = {
     val numOutputRows = gpuLongMetric(NUM_OUTPUT_ROWS)
@@ -400,13 +409,12 @@ case class GpuProjectExec(
 
     val rdd = child.executeColumnar()
 
-    // if enabled dump/replay project runtime meta and data feature
-    // This is for test purpose
-    val enableReplay = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_TYPE.key).equals("project")
-    var currentDumpNumForReplay = 0
+    // This is for test purpose; dump project list
+    replayDumperOpt.foreach(d => d.dumpMeta[GpuTieredProject]("GpuTieredProject", boundProjectList))
 
     rdd.map { cb =>
-      if (enableReplay) {
+      // This is for test purpose
+      replayDumperOpt.foreach { _ =>
         // increase refCount because `projectAndCloseWithRetrySingleBatch` will close cb
         for (i <- 0 until cb.numCols()) {
           cb.column(i).asInstanceOf[GpuColumnVector].incRefCount()
@@ -414,66 +422,18 @@ case class GpuProjectExec(
       }
 
       val previousOpTime = opTime.value
+      // execute project
       val ret = GpuProjectExec.projectCb(boundProjectList, cb, opTime)
       numOutputBatches += 1
       numOutputRows += ret.numRows()
 
-      // ================ Begin: for replay exec feature ================
-      // This is for test purpose
-      if (enableReplay) {
-        logWarning("dump project runtime: enabled")
-
-        val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key)
-        val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_MS.key).toInt
-        val maxDumpNum = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_MAX_BATCH_NUM.key).toInt
-        val filter = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_FILTER_INCLUDE.key)
-        val projectHashCode = this.hashCode()
-
-        logWarning(s"dump project runtime: dump dir is $dumpDir")
-        logWarning(s"dump project: threshold MS is $thresholdMS")
-        logWarning(s"dump project: maxDumpNum MS is $maxDumpNum")
-        logWarning(s"dump project: filter is $filter")
-
+      // This is for test purpose; dump if feature is enabled
+      replayDumperOpt.foreach { d =>
         withResource(cb) { _ =>
-          val elapsedTime = (opTime.value - previousOpTime) / 1000000 // convert ns to ms
-          if (elapsedTime > thresholdMS) {
-            logWarning(s"dump project: elapsedTime $elapsedTime > thresholdMS $thresholdMS")
-
-            // if execution time for this column batch is long
-            if (filter.isEmpty || projectList.exists(p => p.sql.contains(filter))) {
-              logWarning(s"dump project: check filter passed, filter is $filter")
-
-              if (currentDumpNumForReplay < maxDumpNum) {
-                // did not dump a parquet before
-                logWarning(s"dump project: current dump num $currentDumpNumForReplay " +
-                    s"< max dump num $maxDumpNum")
-
-                // 1. dump project metadata
-                serializeObject[GpuTieredProject](s"$dumpDir/" +
-                    s"${projectHashCode}_GpuTieredProject.meta",
-                  boundProjectList)
-                logWarning(s"dump project: dump project meta done")
-
-                // 2. dump column batch column types
-                val cbTypes = GpuColumnVector.extractTypes(cb)
-                serializeObject(s"$dumpDir/${projectHashCode}_cb_types.meta", cbTypes)
-                logWarning(s"dump project: dump column batch column types done")
-
-                // 3. dump column batch data
-                withResource(GpuColumnVector.from(cb)) { table =>
-                  DumpUtils.dumpToParquetFile(table, filePrefix = s"$dumpDir/" +
-                      s"${projectHashCode}_cb_data_")
-                  logWarning(s"dump project: dump column batch data done")
-                }
-
-                currentDumpNumForReplay += 1
-                logWarning(s"dump project: completed successfully!!!")
-              }
-            }
-          }
+          val elapsedTimeNS = opTime.value - previousOpTime
+          d.dumpColumnBatch(elapsedTimeNS, cb)
         }
       }
-      // ================ End: for replay exec feature ================
 
       ret
     }
