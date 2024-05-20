@@ -1,7 +1,7 @@
 This doc describes how to dump an Exec runtime meta and column batch data to a local directory,
-and replay the Exec with dumped meta and data. When encountering a perf issue, then use this tool
-can dump the runtime meta/data and replay. Because only dump one column batch, it will spend 
-less time to collect NSYS and NCU information when replaying the dumped runtime meta/data.
+and replay the Exec with the dumped meta and data. When encountering a perf issue using this tool
+can dump the runtime meta/data and then replay. It will spend less time when collecting NSYS and 
+NCU information when replaying the dumped runtime meta/data.
 
 # Dump a Exec meta and a column batch data
 
@@ -24,6 +24,10 @@ spark.conf.set("spark.rapids.sql.test.replay.exec.dumpDir", "/tmp/replay-exec")
 // Only dump the column bach when executing time against it exceeds this threshold time in MS
 spark.conf.set("spark.rapids.sql.test.replay.exec.threshold.timeMS", 100)
 
+// max dumping number of column batchs
+// Default value is 1  
+spark.conf.set("spark.rapids.sql.test.replay.exec.maxBatchNum", 1)
+
 // If sepcified, only dump when the Exec SQL contains this filter pattern
 // Default value is empty which means no filter
 // This example means enable dumping when Exec SQL contains "get_json_object"
@@ -35,10 +39,12 @@ This dumping only happens when GPU Exec is running, so should enable Spark-Rapid
 After the job is done, check the dump path will have files like:
 ```
 /tmp/replay-exec:
-  - GpuTieredProject.meta      // this is serialized GPU Tiered Project case class  
-  - cb_types.meta              // this is types for column batch
-  - cb_data_101656570.parquet  // this is data for column batch
+  - xxx_GpuTieredProject.meta      // this is serialized GPU Tiered Project case class  
+  - xxx_cb_types.meta              // this is types for column batch
+  - xxx_cb_data_101656570.parquet  // this is data for column batch
 ```
+The prefix `xxx` is the hash code for a specific Project Exec, this is used to distinct multiple
+Project Execs.
 
 # Replay saved Exec runtime meta and data
 
@@ -50,12 +56,18 @@ export SPARK_HOME=path_to_spark_home_330
 
 ## replay command
 
-### Project replay
+### Collect NSYS with replaying
 ```
-$SPARK_HOME/bin/spark-submit \
+nsys profile $SPARK_HOME/bin/spark-submit \
   --class com.nvidia.spark.rapids.ProjectExecReplayer \
   --conf spark.rapids.sql.explain=ALL \
   --master local[*] \
   --jars ${PLUGIN_JAR} \
-  ${PLUGIN_JAR} <path_to_saved_replay_dir>
+  ${PLUGIN_JAR} <path_to_saved_replay_dir> <hash_code_of_project_exec>
 ```
+
+<path_to_saved_replay_dir> is the replay directory   
+<hash_code_of_project_exec> is the hash code for a specific Project Exec. Dumping may generate
+multiple data for each project, here should specify replay which project.   
+The replaying only replay one column batch, if there are multiple column batches for a project, it
+will only replay the first column batch.

@@ -2293,15 +2293,20 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         .stringConf
         .createWithDefault("/tmp")
 
-
-
-  val TEST_REPLAY_EXEC_THRESHOLD_TIME_MS =
-    conf("spark.rapids.sql.test.replay.exec.threshold.timeMS")
-        .doc("Only for tests: Only dump the column bach when executing time against it " +
+  val TEST_REPLAY_EXEC_THRESHOLD_MS =
+    conf("spark.rapids.sql.test.replay.exec.threshold.MS")
+        .doc("Only for tests: Only dump the column batch when executing time against it " +
             " exceeds this threshold time in MS")
         .internal()
         .integerConf
         .createWithDefault(100)
+
+  val TEST_REPLAY_EXEC_MAX_BATCH_NUM =
+    conf("spark.rapids.sql.test.replay.exec.maxBatchNum")
+        .doc("Only for tests: Max dumping number of column batches")
+        .internal()
+        .integerConf
+        .createWithDefault(1)
 
   val TEST_REPLAY_EXEC_FILTER_INCLUDE =
     conf("spark.rapids.sql.test.replay.exec.filter.include")
@@ -3123,10 +3128,11 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
 
   lazy val testReplayExecType: String = get(TEST_REPLAY_EXEC_TYPE)
 
-  lazy val testReplayExecThresholdTimeMS: Int = get(TEST_REPLAY_EXEC_THRESHOLD_TIME_MS)
+  lazy val testReplayExecThresholdMS: Int = get(TEST_REPLAY_EXEC_THRESHOLD_MS)
 
   lazy val testReplayExecFilterInclude: String = get(TEST_REPLAY_EXEC_FILTER_INCLUDE)
 
+  lazy val testReplayExecMaxBatchNum: Int = get(TEST_REPLAY_EXEC_MAX_BATCH_NUM)
 
   private val optimizerDefaults = Map(
     // this is not accurate because CPU projections do have a cost due to appending values
