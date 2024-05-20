@@ -401,7 +401,9 @@ case class GpuProjectExec(
     val rdd = child.executeColumnar()
 
     // if enabled dump/replay project runtime meta and data feature
+    // This is for test purpose
     val enableReplay = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_TYPE.key).equals("project")
+    var currentDumpNumForReplay = 0
 
     rdd.map { cb =>
       if (enableReplay) {
@@ -417,49 +419,54 @@ case class GpuProjectExec(
       numOutputRows += ret.numRows()
 
       // ================ Begin: for replay exec feature ================
+      // This is for test purpose
       if (enableReplay) {
         logWarning("dump project runtime: enabled")
 
-        withResource(cb) { _ =>
-          val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key)
-          logWarning(s"dump project runtime: dump dir is $dumpDir")
-          val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_TIME_MS.key)
-              .toInt
-          logWarning(s"dump project: threshold MS is $thresholdMS")
-          val filter = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_FILTER_INCLUDE.key)
-          logWarning(s"dump project: filter is $filter")
-          val elapsedTime = (opTime.value - previousOpTime) / 1000000 // convert ns to ms
+        val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key)
+        val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_MS.key).toInt
+        val maxDumpNum = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_MAX_BATCH_NUM.key).toInt
+        val filter = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_FILTER_INCLUDE.key)
+        val projectHashCode = this.hashCode()
 
+        logWarning(s"dump project runtime: dump dir is $dumpDir")
+        logWarning(s"dump project: threshold MS is $thresholdMS")
+        logWarning(s"dump project: maxDumpNum MS is $maxDumpNum")
+        logWarning(s"dump project: filter is $filter")
+
+        withResource(cb) { _ =>
+          val elapsedTime = (opTime.value - previousOpTime) / 1000000 // convert ns to ms
           if (elapsedTime > thresholdMS) {
             logWarning(s"dump project: elapsedTime $elapsedTime > thresholdMS $thresholdMS")
 
             // if execution time for this column batch is long
             if (filter.isEmpty || projectList.exists(p => p.sql.contains(filter))) {
-              logWarning(s"dump project: check filter passed")
+              logWarning(s"dump project: check filter passed, filter is $filter")
 
-              // filter is empty or Exec sql contains filter pattern
-              val dumpedParquet = new File(dumpDir).listFiles(f => f.getName.startsWith("cb_data_")
-                  && f.getName.endsWith(".parquet"))
-              if (dumpedParquet == null || dumpedParquet.isEmpty) {
+              if (currentDumpNumForReplay < maxDumpNum) {
                 // did not dump a parquet before
-                logWarning(s"dump project: did not find any dump, begin dump")
+                logWarning(s"dump project: current dump num $currentDumpNumForReplay " +
+                    s"< max dump num $maxDumpNum")
 
                 // 1. dump project metadata
-                serializeObject[GpuTieredProject](s"$dumpDir/GpuTieredProject.meta",
+                serializeObject[GpuTieredProject](s"$dumpDir/" +
+                    s"${projectHashCode}_GpuTieredProject.meta",
                   boundProjectList)
                 logWarning(s"dump project: dump project meta done")
 
                 // 2. dump column batch column types
                 val cbTypes = GpuColumnVector.extractTypes(cb)
-                serializeObject(s"$dumpDir/cb_types.meta", cbTypes)
+                serializeObject(s"$dumpDir/${projectHashCode}_cb_types.meta", cbTypes)
                 logWarning(s"dump project: dump column batch column types done")
 
                 // 3. dump column batch data
                 withResource(GpuColumnVector.from(cb)) { table =>
-                  DumpUtils.dumpToParquetFile(table, filePrefix = s"$dumpDir/cb_data_")
+                  DumpUtils.dumpToParquetFile(table, filePrefix = s"$dumpDir/" +
+                      s"${projectHashCode}_cb_data_")
                   logWarning(s"dump project: dump column batch data done")
                 }
 
+                currentDumpNumForReplay += 1
                 logWarning(s"dump project: completed successfully!!!")
               }
             }

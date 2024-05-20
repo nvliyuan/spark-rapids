@@ -50,29 +50,32 @@ object ProjectExecReplayer extends Logging {
    */
   def main(args: Array[String]): Unit = {
     // check arguments and get paths
-    if (args.length < 1) {
+    if (args.length < 2) {
       logError("Project Exec replayer: Specify a replay dir that contains replay data")
       return
     }
     val replayDir = args(0)
-    val cbTypesPath = replayDir + "/cb_types.meta"
+    val projectHash = args(1)
+
+    val cbTypesPath = replayDir + s"/${projectHash}_cb_types.meta"
     if (!(new File(cbTypesPath).exists() && new File(cbTypesPath).isFile)) {
       logError(s"Project Exec replayer: there is no cb_types.meta file in $replayDir")
       return
     }
-    val projectMetaPath = replayDir + "/GpuTieredProject.meta"
+    val projectMetaPath = replayDir + s"/${projectHash}_GpuTieredProject.meta"
     if (!(new File(projectMetaPath).exists() && new File(projectMetaPath).isFile)) {
       logError(s"Project Exec replayer: there is no GpuTieredProject.meta file in $replayDir")
       return
     }
-    // find Parquet a file, e.g.: cb_data_101656570.parquet
-    val parquets = new File(replayDir).listFiles(f => f.getName.startsWith("cb_data_")
-        && f.getName.endsWith(".parquet"))
+    // find Parquet a file, e.g.: xxx_cb_data_101656570.parquet
+    val parquets = new File(replayDir).listFiles(
+      f => f.getName.startsWith(s"${${projectHash}}_cb_data_") &&
+          f.getName.endsWith(".parquet"))
     if (parquets == null || parquets.isEmpty) {
       logError(s"Project Exec replayer: there is no cb_data_xxx.parquet file in $replayDir")
       return
     }
-    // only test 1 parquet
+    // only replay 1st parquet
     val cbPath = parquets(0).getAbsolutePath
 
     logWarning("Project Exec replayer: start running.")
