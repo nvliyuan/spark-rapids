@@ -56,6 +56,7 @@ object ProjectExecReplayer extends Logging {
     // check arguments and get paths
     if (args.length < 2) {
       logError("Project Exec replayer: Specify 2 args: data path and hashCode")
+      printUsage()
       return
     }
     var replayDir = args(0)
@@ -75,12 +76,15 @@ object ProjectExecReplayer extends Logging {
 
     val cbTypesPath = replayDir + s"/${projectHash}_cb_types.meta"
     if (!(new File(cbTypesPath).exists() && new File(cbTypesPath).isFile)) {
-      logError(s"Project Exec replayer: there is no cb_types.meta file in $replayDir")
+      logError(s"Project Exec replayer: there is no xxx_cb_types.meta file in $replayDir")
+      printUsage()
       return
     }
     val projectMetaPath = replayDir + s"/${projectHash}_GpuTieredProject.meta"
     if (!(new File(projectMetaPath).exists() && new File(projectMetaPath).isFile)) {
-      logError(s"Project Exec replayer: there is no GpuTieredProject.meta file in $replayDir")
+      logError(s"Project Exec replayer: " +
+          s"there is no xxx_GpuTieredProject.meta file in $replayDir")
+      printUsage()
       return
     }
 
@@ -89,7 +93,9 @@ object ProjectExecReplayer extends Logging {
       f => f.getName.startsWith(s"${projectHash}_cb_data_") &&
           f.getName.endsWith(".parquet"))
     if (parquets == null || parquets.isEmpty) {
-      logError(s"Project Exec replayer: there is no cb_data_xxx.parquet file in $replayDir")
+      logError(s"Project Exec replayer: " +
+          s"there is no xxx_cb_data_xxx.parquet file in $replayDir")
+      printUsage()
       return
     }
     // NOTE: only replay 1st parquet
@@ -122,6 +128,38 @@ object ProjectExecReplayer extends Logging {
     }
   }
 
+  private def printUsage(): Unit = {
+    val usageString =
+"""
+Usage is:
+$SPARK_HOME/bin/spark-submit \
+  --class org.apache.spark.sql.rapids.test.ProjectExecReplayer \
+  --conf spark.rapids.sql.explain=ALL \
+  --master local[*] \
+  --jars ${PLUGIN_JAR} \
+  ${PLUGIN_JAR} <dumped path> <project hash code>
+e.g.:
+The files in dumped path(hdfs://host/path/to/dir) are:
+  938389771_GpuTieredProject.meta
+  938389771_cb_types.meta
+  938389771_cb_data_0_1140517444.parquet
+The project hash code is the file prefix: `938389771`
+The command will be:
+$SPARK_HOME/bin/spark-submit \
+  --class org.apache.spark.sql.rapids.test.ProjectExecReplayer \
+  --conf spark.rapids.sql.explain=ALL \
+  --master local[*] \
+  --jars ${PLUGIN_JAR} \
+  ${PLUGIN_JAR} hdfs://host/path/to/dir 938389771
+Note:
+  dumped path could be remote path or local path, e.g.:
+   hdfs://host/path/to/dir
+   file:/path/to/dir
+  Replay will only run one parquet file in the replay dir.
+"""
+    logError(usageString)
+  }
+
   private def copyToLocal(replayDir: String): String = {
     // used to access remote path
     val hadoopConf = SparkSession.active.sparkContext.hadoopConfiguration
@@ -134,6 +172,7 @@ object ProjectExecReplayer extends Logging {
       val uuid = java.util.UUID.randomUUID.toString
       val localReplayDir = s"/tmp/replay-exec-tmp-$uuid"
       fs.copyToLocalFile(replayDirPath, new Path(s"/tmp/replay-exec-tmp-$uuid"))
+      logWarning(s"Copied from remote dir $replayDir to local dir $localReplayDir")
       localReplayDir
     } else {
       // Remove the 'file:' prefix. e.g.: file:/a/b/c => /a/b/c
