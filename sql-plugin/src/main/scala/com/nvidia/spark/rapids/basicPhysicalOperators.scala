@@ -383,9 +383,12 @@ case class GpuProjectExec(
   private val replayDumperOpt: Option[ReplayDumper] = if (dumpForReplay) {
     val spark = SparkSession.active
     val hadoopConf = new SerializableConfiguration(spark.sparkContext.hadoopConfiguration)
-    val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key)
-    val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_MS.key).toInt
-    val batchLimit = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_BATCH_LIMIT.key).toInt
+    val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key,
+      defaultValue = "file:/tmp")
+    val thresholdMS = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_THRESHOLD_MS.key,
+      defaultValue = "1000").toInt
+    val batchLimit = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_BATCH_LIMIT.key,
+      defaultValue = "1").toInt
     val projectHashCode = Math.abs(this.hashCode())
     Some(ReplayDumper(hadoopConf, dumpDir, thresholdMS, batchLimit, projectHashCode))
   } else {
@@ -394,7 +397,6 @@ case class GpuProjectExec(
 
   override def otherCopyArgs: Seq[AnyRef] =
     Seq[AnyRef](useTieredProject.asInstanceOf[java.lang.Boolean])
-
   override def output: Seq[Attribute] = projectList.map(_.toAttribute)
 
   override lazy val additionalMetrics: Map[String, GpuMetric] = Map(
