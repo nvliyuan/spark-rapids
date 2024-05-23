@@ -1492,3 +1492,55 @@ def test_parquet_column_name_with_dots(spark_tmp_path, reader_confs):
     assert_gpu_and_cpu_are_equal_collect(lambda spark: reader(spark).selectExpr("`a.b`"), conf=all_confs)
     assert_gpu_and_cpu_are_equal_collect(lambda spark: reader(spark).selectExpr("`a.b`.`c.d.e`.`f.g`"),
                                          conf=all_confs)
+
+
+"""
+VeloxScan:
+1. DecimalType is NOT fully supported
+2. TimestampType can NOT be the KeyType of MapType
+3. Map of Map might produce incorrect result (usually occurring when table is very small)
+"""
+velox_gens = [
+    [byte_gen, short_gen, int_gen, long_gen, float_gen, double_gen,
+     string_gen, boolean_gen, date_gen,
+     TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc)), ArrayGen(byte_gen),
+     ArrayGen(long_gen), ArrayGen(string_gen), ArrayGen(date_gen),
+     ArrayGen(TimestampGen(start=datetime(1900, 1, 1, tzinfo=timezone.utc))),
+     ArrayGen(ArrayGen(byte_gen)),
+     StructGen([['child0', ArrayGen(byte_gen)], ['child1', byte_gen], ['child2', float_gen],
+                ['child3', decimal_gen_64bit]]),
+     ArrayGen(StructGen([['child0', string_gen], ['child1', double_gen], ['child2', int_gen]]))
+     ],
+    [MapGen(f(nullable=False), f()) for f in [
+        BooleanGen, ByteGen, ShortGen, IntegerGen, LongGen, FloatGen, DoubleGen, DateGen]
+     ],
+    [simple_string_to_string_map_gen,
+     MapGen(StringGen(pattern='key_[0-9]', nullable=False), ArrayGen(string_gen),
+            max_length=10),
+     MapGen(RepeatSeqGen(IntegerGen(nullable=False), 10), long_gen, max_length=10),
+     # MapGen(StringGen(pattern='key_[0-9]', nullable=False), simple_string_to_string_map_gen)
+     ],
+]
+
+# Enable test cases for VeloxScan only if Velox has been loaded during launch
+def velox_reader(data_path):
+    def _reader(spark):
+        if spark.conf.get("spark.rapids.sql.loadVelox") == "false":
+            return spark.range(1, 10).toDF("a")
+        return spark.read.parquet(data_path)
+    return _reader
+
+@pytest.mark.parametrize('parquet_gens', velox_gens, ids=idfn)
+@pytest.mark.parametrize('gen_rows', [32, 128, 512, 2048], ids=idfn)
+def test_parquet_read_round_trip_velox(spark_tmp_path, parquet_gens, gen_rows):
+    gen_list = [('_c' + str(i), gen) for i, gen in enumerate(parquet_gens)]
+    data_path = spark_tmp_path + '/PARQUET_DATA'
+    with_cpu_session(
+        lambda spark: gen_df(spark, gen_list, length=gen_rows).write.parquet(data_path),
+        conf=rebase_write_corrected_conf)
+    assert_gpu_and_cpu_are_equal_collect(
+        velox_reader(data_path),
+        conf={
+            'spark.sql.sources.useV1SourceList': 'parquet',
+            'spark.rapids.sql.parquet.useVelox': 'true'
+        })

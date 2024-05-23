@@ -69,6 +69,11 @@
             <version>${spark-rapids-private.version}</version>
             <classifier>${spark.version.classifier}</classifier>
         </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-velox_2.12</artifactId>
+            <version>${spark-rapids-private.version}</version>
+        </dependency>
     </dependencies>
     <build>
         <plugins>

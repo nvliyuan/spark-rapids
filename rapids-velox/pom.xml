@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+ NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ property and proprietary rights in and to this material, related
+ documentation and any modifications thereto. Any use, reproduction,
+ disclosure or distribution of this material and related documentation
+ without an express license agreement from NVIDIA CORPORATION or
+ its affiliates is strictly prohibited.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.nvidia</groupId>
+        <artifactId>rapids-4-spark-shim-deps-parent_2.12</artifactId>
+        <version>24.08.0-SNAPSHOT</version>
+        <relativePath>../shim-deps/pom.xml</relativePath>
+    </parent>
+    <artifactId>rapids-4-spark-velox_2.12</artifactId>
+    <name>Velox Adaptor for RAPIDS Accelerator</name>
+    <description>Velox Adaptor for RAPIDS Accelerator</description>
+    <version>24.08.0-SNAPSHOT</version>
+
+    <properties>
+        <rapids.module>rapids-velox</rapids.module>
+        <gluten.check.version>1.1.0</gluten.check.version>
+        <gluten.check.skip>false</gluten.check.skip>
+        <gluten.clean.skip>true</gluten.clean.skip>
+        <main.basedir>${project.basedir}/..</main.basedir>
+        <gluten.base.path>${main.basedir}/thirdparty/incubator-gluten</gluten.base.path>
+        <gluten.build.path>${gluten.base.path}/cpp/build</gluten.build.path>
+        <gluten.build.force>false</gluten.build.force>
+        <native.build.path>${project.basedir}/src/main/cpp/build</native.build.path>
+        <CPP_PARALLEL_LEVEL>4</CPP_PARALLEL_LEVEL>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>spark-rapids-jni</artifactId>
+            <version>${spark-rapids-jni.version}</version>
+            <classifier>cuda11</classifier>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-sql_${scala.binary.version}</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.glutenproject</groupId>
+            <artifactId>spark-sql-columnar-shims-spark32</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.glutenproject</groupId>
+            <artifactId>backends-velox</artifactId>
+            <!-- Use provided, will not package libgluten.so libvelox.so in this jar-->
+            <!-- Should provide this or gluten-velox-bundle when submitting Spark job -->
+            <scope>provided</scope>
+	        <version>1.1.0</version>
+        </dependency>
+    </dependencies>
+
+    <profiles>
+    </profiles>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.0.2</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>tests</classifier>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>net.alchim31.maven</groupId>
+                <artifactId>scala-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.scalatest</groupId>
+                <artifactId>scalatest-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

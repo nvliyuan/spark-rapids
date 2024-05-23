@@ -1651,6 +1651,24 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .booleanConf
     .createWithDefault(false)
 
+  val PARQUET_VELOX_READER = conf("spark.rapids.sql.parquet.useVelox")
+    .doc("Use velox to do ParquetScan (on CPUs)")
+    .internal()
+    .booleanConf
+    .createWithDefault(false)
+
+  val ENABLE_NATIVE_VELOX_CONVERTER = conf("spark.rapids.sql.enableNativeVeloxConverter")
+    .doc("Re-formatting VeloxColumn to align with the memory layout of GpuColumn directly")
+    .internal()
+    .booleanConf
+    .createWithDefault(true)
+
+  val LOAD_VELOX = conf("spark.rapids.sql.loadVelox")
+    .doc("Load Velox (through Gluten) as a spark driver plugin")
+    .startupOnly()
+    .booleanConf
+    .createWithDefault(false)
+
   val HASH_AGG_REPLACE_MODE = conf("spark.rapids.sql.hashAgg.replaceMode")
     .doc("Only when hash aggregate exec has these modes (\"all\" by default): " +
       "\"all\" (try to replace all aggregates, default), " +
@@ -2749,6 +2767,12 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val avroDebugDumpPrefix: Option[String] = get(AVRO_DEBUG_DUMP_PREFIX)
 
   lazy val avroDebugDumpAlways: Boolean = get(AVRO_DEBUG_DUMP_ALWAYS)
+
+  lazy val parquetVeloxReader: Boolean = get(PARQUET_VELOX_READER)
+
+  lazy val enableNativeVeloxConverter: Boolean = get(ENABLE_NATIVE_VELOX_CONVERTER)
+
+  lazy val loadVelox: Boolean = get(LOAD_VELOX)
 
   lazy val hashAggReplaceMode: String = get(HASH_AGG_REPLACE_MODE)
 

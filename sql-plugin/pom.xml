@@ -102,6 +102,20 @@
             <artifactId>mockito-core</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>io.glutenproject</groupId>
+            <artifactId>backends-velox</artifactId>
+            <version>1.1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.glutenproject</groupId>
+            <artifactId>spark-sql-columnar-shims-spark32</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.nvidia</groupId>
+            <artifactId>rapids-4-spark-velox_${scala.binary.version}</artifactId>
+            <version>${project.version}</version>
+        </dependency>
     </dependencies>
     <build>
         <resources>

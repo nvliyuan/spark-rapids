@@ -41,7 +41,15 @@ object ScanExecShims {
         (TypeSig.commonCudfTypes + TypeSig.NULL + TypeSig.STRUCT + TypeSig.MAP +
           TypeSig.ARRAY + TypeSig.BINARY + TypeSig.DECIMAL_128).nested(),
         TypeSig.all),
-      (fsse, conf, p, r) => new FileSourceScanExecMeta(fsse, conf, p, r)),
+      (fsse, conf, p, r) =>
+        if (conf.parquetVeloxReader) {
+          require(conf.loadVelox,
+            "Velox has NOT been loaded! Please enable spark.rapids.sql.loadVelox before startup")
+          require(!fsse.bucketedScan, "VeloxParquetReader do NOT support bucketedScan for now")
+          new VeloxFileSourceScanExecMeta(fsse, conf, p, r)
+        } else {
+          new FileSourceScanExecMeta(fsse, conf, p, r)
+        }),
     GpuOverrides.exec[BatchScanExec](
       "The backend for most file input",
       ExecChecks(
