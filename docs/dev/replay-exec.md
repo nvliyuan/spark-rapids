@@ -22,9 +22,9 @@ Set the following configurations to enable this feature:
 ``` 
 spark.conf.set("spark.rapids.sql.debug.replay.exec.types", "project")
 ```
-Default `type` value is empty which means do not dump.   
-Set this `type` to `project` if you want to dump Project Exec runtime data. Currently only support
-`project` and empty.
+Default `types` value is empty which means do not dump.   
+Define the Exec types for dumping, separated by comma, e.g.: `project,aggregate,sort`.   
+Note currently only support `project`
 
 ```
 spark.conf.set("spark.rapids.sql.debug.replay.exec.dumpDir", "file:/tmp")
