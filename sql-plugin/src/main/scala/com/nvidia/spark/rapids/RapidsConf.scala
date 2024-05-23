@@ -2279,31 +2279,32 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
    * only supports "project" now
    */
   val TEST_REPLAY_EXEC_TYPE =
-    conf("spark.rapids.sql.test.replay.exec.type")
-        .doc("Only for tests: Define the Exec type for dumping")
+    conf("spark.rapids.sql.debug.replay.exec.types")
+        .doc("Only for debug: Define the Exec types for dumping, separated by comma, e.g.: " +
+            "project,aggregate,sort. Note currently only support project")
         .internal()
         .stringConf
         .createWithDefault("")
 
   val TEST_REPLAY_EXEC_DUMP_DIR =
-    conf("spark.rapids.sql.test.replay.exec.dumpDir")
-        .doc("Only for tests: Define the directory when dumping Exec runtime " +
+    conf("spark.rapids.sql.debug.replay.exec.dumpDir")
+        .doc("Only for debug: Define the directory when dumping Exec runtime " +
             "meta and column batch data")
         .internal()
         .stringConf
         .createWithDefault("file:/tmp")
 
   val TEST_REPLAY_EXEC_THRESHOLD_MS =
-    conf("spark.rapids.sql.test.replay.exec.threshold.MS")
-        .doc("Only for tests: Only dump the column batch when executing time against it " +
+    conf("spark.rapids.sql.debug.replay.exec.threshold.MS")
+        .doc("Only for debug: Only dump the column batch when executing time against it " +
             " exceeds this threshold time in MS")
         .internal()
         .integerConf
         .createWithDefault(1000)
 
   val TEST_REPLAY_EXEC_BATCH_LIMIT =
-    conf("spark.rapids.sql.test.replay.batch.limit")
-        .doc("Only for tests: Max dumping number of column batches")
+    conf("spark.rapids.sql.debug.replay.batch.limit")
+        .doc("Only for debug: Max dumping number of column batches")
         .internal()
         .integerConf
         .createWithDefault(1)
