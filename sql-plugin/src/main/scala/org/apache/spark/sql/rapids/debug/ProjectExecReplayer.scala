@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.rapids.test
+package org.apache.spark.sql.rapids.debug
 
 import java.io.File
 import java.nio.ByteBuffer

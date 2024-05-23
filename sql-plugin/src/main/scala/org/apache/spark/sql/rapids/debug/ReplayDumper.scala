@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package org.apache.spark.sql.rapids.test
+package org.apache.spark.sql.rapids.debug
 
 import java.io.{File, FileInputStream}
 import java.util.concurrent.atomic.AtomicInteger
@@ -109,5 +109,6 @@ case class ReplayDumper(
 }
 
 object ReplayDumper {
-  def enabledReplayForProject(conf: RapidsConf): Boolean = conf.testReplayExecType.equals("project")
+  def enabledReplayForProject(conf: RapidsConf): Boolean =
+    conf.testReplayExecType.contains("project")
 }

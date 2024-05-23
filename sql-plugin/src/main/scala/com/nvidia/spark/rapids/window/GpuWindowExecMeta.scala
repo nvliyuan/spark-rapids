@@ -25,7 +25,7 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference,
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.rapids.aggregate.GpuAggregateExpression
-import org.apache.spark.sql.rapids.test.ReplayDumper
+import org.apache.spark.sql.rapids.debug.ReplayDumper
 
 /**
  * Base class for GPU Execs that implement window functions. This abstracts the method

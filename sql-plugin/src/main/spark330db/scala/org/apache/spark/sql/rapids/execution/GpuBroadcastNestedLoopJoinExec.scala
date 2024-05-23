@@ -34,7 +34,7 @@ import org.apache.spark.sql.execution.{CoalescedPartitionSpec, SparkPlan}
 import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
 import org.apache.spark.sql.execution.exchange.ReusedExchangeExec
 import org.apache.spark.sql.execution.joins.BroadcastNestedLoopJoinExec
-import org.apache.spark.sql.rapids.test.ReplayDumper
+import org.apache.spark.sql.rapids.debug.ReplayDumper
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
 
