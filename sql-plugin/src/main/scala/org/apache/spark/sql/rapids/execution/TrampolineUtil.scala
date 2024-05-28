@@ -232,9 +232,6 @@ object TrampolineUtil {
       keepAliveSeconds)
   }
   
-  def newDaemonSingleThreadScheduledExecutor(threadName: String): ScheduledExecutorService = {
-    ThreadUtils.newDaemonSingleThreadScheduledExecutor(threadName)
-  }
 
   def postEvent(sc: SparkContext, sparkEvent: SparkListenerEvent): Unit = {
     sc.listenerBus.post(sparkEvent)

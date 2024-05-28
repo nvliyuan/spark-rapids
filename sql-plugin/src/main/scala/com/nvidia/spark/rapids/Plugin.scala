@@ -495,7 +495,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
   var rapidsShuffleHeartbeatEndpoint: RapidsShuffleHeartbeatEndpoint = null
   private lazy val extraExecutorPlugins =
     RapidsPluginUtils.extraPlugins.map(_.executorPlugin()).filterNot(_ == null)
-  private var profilePath: Option[String] = None
   private val activeTaskNvtx = new ConcurrentHashMap[Thread, NvtxRange]()
 
   override def init(
