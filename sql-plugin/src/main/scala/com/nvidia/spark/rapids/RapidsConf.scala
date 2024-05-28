@@ -715,8 +715,7 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .createOptional
 
   val PROFILE_EXECUTORS = conf("spark.rapids.profile.executors")
-    .doc("Comma-separated list of executors IDs and hyphenated ranges of executor IDs to " +
-      "profile when profiling is enabled")
+    .doc("Comma-separated list of executors to profile when profiling is enabled")
     .internal()
     .stringConf
     .createWithDefault("0")
@@ -729,27 +728,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .internal()
     .stringConf
     .createOptional
-
-  val PROFILE_JOBS = conf("spark.rapids.profile.jobs")
-    .doc("Comma-separated list of job IDs and hyphenated ranges of job IDs to " +
-      "profile when profiling is enabled")
-    .internal()
-    .stringConf
-    .createOptional
-
-  val PROFILE_STAGES = conf("spark.rapids.profile.stages")
-    .doc("Comma-separated list of stage IDs and hyphenated ranges of stage IDs to " +
-      "profile when profiling is enabled")
-    .internal()
-    .stringConf
-    .createOptional
-
-  val PROFILE_DRIVER_POLL_MILLIS = conf("spark.rapids.profile.driverPollMillis")
-    .doc("Interval in milliseconds the executors will poll for job and stage completion when " +
-      "stage-level profiling is used.")
-    .internal()
-    .integerConf
-    .createWithDefault(1000)
 
   val PROFILE_COMPRESSION = conf("spark.rapids.profile.compression")
     .doc("Specifies the compression codec to use when writing profile data, one of " +
@@ -2565,12 +2543,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val profileExecutors: String = get(PROFILE_EXECUTORS)
 
   lazy val profileTimeRangesSeconds: Option[String] = get(PROFILE_TIME_RANGES_SECONDS)
-
-  lazy val profileJobs: Option[String] = get(PROFILE_JOBS)
-
-  lazy val profileStages: Option[String] = get(PROFILE_STAGES)
-
-  lazy val profileDriverPollMillis: Int = get(PROFILE_DRIVER_POLL_MILLIS)
 
   lazy val profileCompression: String = get(PROFILE_COMPRESSION)
 

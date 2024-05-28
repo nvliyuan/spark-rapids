@@ -18,7 +18,6 @@ package org.apache.spark.sql.rapids.execution
 
 import java.util.concurrent.ThreadPoolExecutor
 
-import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
 
 import org.apache.spark.{SparkConf, SparkContext, SparkEnv, SparkMasterRegex, SparkUpgradeException, TaskContext}
@@ -243,6 +242,4 @@ object TrampolineUtil {
   def postEvent(sc: SparkContext, sparkEvent: SparkListenerEvent): Unit = {
     sc.listenerBus.post(sparkEvent)
   }
-
-  def getSparkHadoopUtilConf: Configuration = SparkHadoopUtil.get.conf
 }
