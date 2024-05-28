@@ -25,13 +25,24 @@ import scala.util.Try
 class RangeConfMatcher(conf: RapidsConf, entry: ConfEntry[String]) {
   private val (stringSet, intRanges) = {
     val confVal = conf.get(entry)
-    val parts = confVal.split(',')
+    val parts = confVal.split(",")
     val (rangeParts, singleParts) = parts.partition(_.contains('-'))
     val ranges = try {
-      rangeParts.map(RangeConfMatcher.parseRange)
+      rangeParts.map { rp =>
+        val rangePair = rp.split('-')
+        if (rangePair.length != 2) {
+          throw new IllegalArgumentException(s"Invalid range: $rp")
+        }
+        val start = rangePair.head.trim.toInt
+        val end = rangePair.last.trim.toInt
+        if (end < start) {
+          throw new IllegalArgumentException(s"Invalid range: $rp")
+        }
+        (start, end)
+      }
     } catch {
-      case e: IllegalArgumentException =>
-        throw new IllegalArgumentException(s"Invalid range settings for $entry: $confVal", e)
+      case e @ (_: IllegalArgumentException | _: NumberFormatException) =>
+        throw new IllegalArgumentException(s"Invalid range settings for ${entry}: $confVal", e)
     }
     (singleParts.map(_.trim).toSet, ranges)
   }
@@ -50,20 +61,5 @@ class RangeConfMatcher(conf: RapidsConf, entry: ConfEntry[String]) {
     intRanges.exists {
       case (start, end) => start <= v && v <= end
     }
-  }
-}
-
-object RangeConfMatcher {
-  def parseRange(rangeStr: String): (Int,Int) = {
-    val rangePair = rangeStr.split('-')
-    if (rangePair.length != 2) {
-      throw new IllegalArgumentException(s"Invalid range: $rangeStr")
-    }
-    val start = rangePair.head.trim.toInt
-    val end = rangePair.last.trim.toInt
-    if (end < start) {
-      throw new IllegalArgumentException(s"Invalid range: $rangeStr")
-    }
-    (start, end)
   }
 }

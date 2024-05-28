@@ -720,15 +720,6 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
     .stringConf
     .createWithDefault("0")
 
-  val PROFILE_TIME_RANGES_SECONDS = conf("spark.rapids.profile.timeRangesInSeconds")
-    .doc("Comma-separated list of start-end ranges of time, in seconds, since executor startup " +
-      "to start and stop profiling. For example, a value of 10-30,100-110 will have the profiler " +
-      "wait for 10 seconds after executor startup then profile for 20 seconds, then wait for " +
-      "70 seconds then profile again for the next 10 seconds")
-    .internal()
-    .stringConf
-    .createOptional
-
   val PROFILE_COMPRESSION = conf("spark.rapids.profile.compression")
     .doc("Specifies the compression codec to use when writing profile data, one of " +
       "zstd or none")
@@ -2541,8 +2532,6 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val profilePath: Option[String] = get(PROFILE_PATH)
 
   lazy val profileExecutors: String = get(PROFILE_EXECUTORS)
-
-  lazy val profileTimeRangesSeconds: Option[String] = get(PROFILE_TIME_RANGES_SECONDS)
 
   lazy val profileCompression: String = get(PROFILE_COMPRESSION)
 
