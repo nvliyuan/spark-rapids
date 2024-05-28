@@ -2301,6 +2301,13 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
       .integerConf
       .createWithDefault(1024)
 
+  val CASE_WHEN_FUSE =
+    conf("spark.rapids.sql.case_when.fuse")
+      .doc("")
+      .internal()
+      .booleanConf
+      .createWithDefault(true)
+
   /**
    * refer to dev doc: `replay-exec.md`
    * only supports "project" now
@@ -3151,6 +3158,8 @@ class RapidsConf(conf: Map[String, String]) extends Logging {
   lazy val testGetJsonObjectSavePath: Option[String] = get(TEST_GET_JSON_OBJECT_SAVE_PATH)
 
   lazy val testGetJsonObjectSaveRows: Int = get(TEST_GET_JSON_OBJECT_SAVE_ROWS)
+
+  lazy val caseWhenFuseEnabled: Boolean = get(CASE_WHEN_FUSE)
 
   lazy val testReplayExecDumpDir: String = get(TEST_REPLAY_EXEC_DUMP_DIR)
 
