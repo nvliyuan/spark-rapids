@@ -36,7 +36,7 @@ object ProfilerManager extends Logging {
       if (shouldProfile(executorId, conf)) {
         logInfo("Starting profiler")
         val w = new ProfileWriter(pluginCtx, pathPrefix)
-        Profiler.init(w, conf.profileWriteBufferSize, conf.profileFlushPeriodMillis)
+        Profiler.init(w)
         Some(w)
       } else {
         None
