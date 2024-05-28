@@ -16,7 +16,7 @@
 
 package org.apache.spark.sql.rapids.execution
 
-import java.util.concurrent.{ScheduledExecutorService, ThreadPoolExecutor}
+import java.util.concurrent.ThreadPoolExecutor
 
 import org.apache.hadoop.conf.Configuration
 import org.json4s.JsonAST
@@ -41,7 +41,7 @@ import org.apache.spark.sql.rapids.shims.DataTypeUtilsShim
 import org.apache.spark.sql.rapids.shims.SparkUpgradeExceptionShims
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.storage.BlockManagerId
-import org.apache.spark.util.{ShutdownHookManager, ThreadUtils, Utils}
+import org.apache.spark.util.{ShutdownHookManager, Utils}
 
 object TrampolineUtil {
   def doExecuteBroadcast[T](child: SparkPlan): Broadcast[T] = child.doExecuteBroadcast()
@@ -225,6 +225,9 @@ object TrampolineUtil {
   def newDaemonCachedThreadPool(
       prefix: String,
       maxThreadNumber: Int,
+      keepAliveSeconds: Int): ThreadPoolExecutor = {
+    org.apache.spark.util.ThreadUtils.newDaemonCachedThreadPool(prefix, maxThreadNumber,
+      keepAliveSeconds)
       keepAliveSeconds: Int = 60): ThreadPoolExecutor = {
     // We want to utilize the ThreadUtils class' ThreadPoolExecutor creation
     // which gives us important Hadoop config variables that are needed for the

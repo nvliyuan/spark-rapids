@@ -18,7 +18,8 @@ package com.nvidia.spark.rapids
 
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, WritableByteChannel}
-import java.util.concurrent.{ConcurrentHashMap, Future, ScheduledExecutorService, TimeUnit}
+import java.util.{Timer, TimerTask}
+import java.util.concurrent.{ConcurrentHashMap, RejectedExecutionException, TimeUnit}
 import java.util.regex.Pattern
 
 import scala.collection.mutable
@@ -44,8 +45,8 @@ object ProfilerOnExecutor extends Logging {
   // NOTE: Active sets are updated asynchronously, synchronize on ExecutorProfiler to access
   private val activeJobs = mutable.HashSet[Int]()
   private val activeStages = mutable.HashSet[Int]()
-  private var timer: Option[ScheduledExecutorService] = None
-  private var timerFuture: Option[Future[_]] = None
+  private var timer: Option[Timer] = None
+  private var isPollingDriver = false
   private var driverPollMillis = 0
   private val startTimestamp = System.nanoTime()
   private var isProfileActive = false
@@ -116,8 +117,7 @@ object ProfilerOnExecutor extends Logging {
 
   def shutdown(): Unit = {
     writer.foreach { w =>
-      timerFuture.foreach(_.cancel(false))
-      timerFuture = None
+      timer.foreach(_.cancel())
       Profiler.shutdown()
       w.close()
     }
@@ -168,7 +168,7 @@ object ProfilerOnExecutor extends Logging {
   private def updateAndSchedule(): Unit = {
     if (timeRanges.isDefined) {
       if (timer.isEmpty) {
-        timer = Some(TrampolineUtil.newDaemonSingleThreadScheduledExecutor("profiler timer"))
+        timer = Some(new Timer("profiler timer", true))
       }
       val now = System.nanoTime()
       // skip time ranges that have already passed
@@ -182,21 +182,21 @@ object ProfilerOnExecutor extends Logging {
       } else {
         currentRanges.headOption.foreach {
           case (start, end) =>
-            val delay = if (start <= now) {
+            val timerDelay = if (start <= now) {
               enable()
-              end - now
+              TimeUnit.NANOSECONDS.toMillis(end - now)
             } else {
               disable()
-              start - now
+              TimeUnit.NANOSECONDS.toMillis(start - now)
             }
-            timerFuture = Some(timer.get.schedule(new Runnable {
+            timer.get.schedule(new TimerTask {
               override def run(): Unit = try {
                 updateAndSchedule()
               } catch {
                 case e: Exception =>
                   logError(s"Error in profiler timer task", e)
               }
-            }, delay, TimeUnit.NANOSECONDS))
+            }, timerDelay)
         }
       }
     } else if (jobRanges.nonEmpty || stageRanges.nonEmpty) {
@@ -207,22 +207,29 @@ object ProfilerOnExecutor extends Logging {
   }
 
   private def startPollingDriver(): Unit = {
-    if (timerFuture.isEmpty) {
+    if (!isPollingDriver) {
       if (timer.isEmpty) {
-        timer = Some(TrampolineUtil.newDaemonSingleThreadScheduledExecutor("profiler timer"))
+        timer = Some(new Timer("profiler timer", true))
       }
-      timerFuture = Some(timer.get.scheduleWithFixedDelay(() => try {
-        updateActiveFromDriver()
-      } catch {
-        case e: Exception =>
-          logError("Profiler timer task error: ", e)
-      }, driverPollMillis, driverPollMillis, TimeUnit.MILLISECONDS))
+      timer.get.schedule(new TimerTask {
+        override def run(): Unit = try {
+          updateActiveFromDriver()
+        } catch {
+          case _: RejectedExecutionException | _: IllegalStateException =>
+          // These can be thrown on shutdown due to RPC tearing down before profiler does
+          case e: Exception =>
+            logError("Profiler timer task error: ", e)
+        }
+      }, driverPollMillis, driverPollMillis)
+      isPollingDriver = true
     }
   }
 
   private def stopPollingDriver(): Unit = {
-    timerFuture.foreach(_.cancel(false))
-    timerFuture = None
+    if (isPollingDriver) {
+      timer.foreach(_.cancel())
+      isPollingDriver = false
+    }
   }
 
   private def updateActiveFromDriver(): Unit = {
