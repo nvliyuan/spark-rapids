@@ -30,7 +30,7 @@ import ai.rapids.cudf.{Cuda, CudaException, CudaFatalException, CudfException, M
 import com.nvidia.spark.rapids.RapidsConf.AllowMultipleJars
 import com.nvidia.spark.rapids.RapidsPluginUtils.buildInfoEvent
 import com.nvidia.spark.rapids.filecache.{FileCache, FileCacheLocalityManager, FileCacheLocalityMsg}
-import com.nvidia.spark.rapids.jni.{GpuTimeZoneDB, Profiler}
+import com.nvidia.spark.rapids.jni.GpuTimeZoneDB
 import com.nvidia.spark.rapids.python.PythonWorkerSemaphore
 import org.apache.commons.lang3.exception.ExceptionUtils
 
@@ -508,11 +508,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
       val sparkConf = pluginContext.conf()
       val numCores = RapidsPluginUtils.estimateCoresOnExec(sparkConf)
       val conf = new RapidsConf(extraConf.asScala.toMap)
-      profilePath = conf.profilePath
-      profilePath.foreach { _ =>
-        logWarning("Starting profiler")
-        Profiler.init()
-      }
 
       // Checks if the current GPU architecture is supported by the
       // spark-rapids-jni and cuDF libraries.
@@ -662,9 +657,6 @@ class RapidsExecutorPlugin extends ExecutorPlugin with Logging {
     GpuSemaphore.shutdown()
     PythonWorkerSemaphore.shutdown()
     GpuDeviceManager.shutdown()
-    profilePath.foreach { _ =>
-      Profiler.shutdown();
-    }
     Option(rapidsShuffleHeartbeatEndpoint).foreach(_.close())
     extraExecutorPlugins.foreach(_.shutdown())
     FileCache.shutdown()
