@@ -910,12 +910,12 @@ public final class VectorizedRleValuesReader extends ValuesReader
 	 * Reads the next group. Returns false if no more group available.
 	 */
 	private boolean readNextGroup() {
-		try {
-			if (in.available() <= 0) {
-				currentCount = 0;
-				return false;
-			}
+		if (in.available() <= 0) {
+			currentCount = 0;
+			return false;
+		}
 
+		try {
 			int header = readUnsignedVarInt();
 			this.mode = (header & 1) == 0 ? MODE.RLE : MODE.PACKED;
 			switch (mode) {

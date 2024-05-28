@@ -32,7 +32,7 @@ import org.apache.parquet.column.page.*;
 import org.apache.parquet.column.values.RequiresPreviousReader;
 import org.apache.parquet.column.values.ValuesReader;
 import org.apache.parquet.column.values.dictionary.PlainValuesDictionary.PlainBinaryDictionary;
-import org.apache.parquet.schema.OriginalType;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
 import org.apache.parquet.schema.PrimitiveType;
 
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
@@ -87,7 +87,7 @@ public class VectorizedColumnReader implements Closeable {
 
   private final PageReader pageReader;
   private final ColumnDescriptor descriptor;
-  private final OriginalType originalType;
+  private final LogicalTypeAnnotation logicalTypeAnnotation;
   private final String datetimeRebaseMode;
   private final ParsedVersion writerVersion;
 
@@ -109,11 +109,12 @@ public class VectorizedColumnReader implements Closeable {
       boolean supportDictLateMaterialize) throws IOException {
     this.descriptor = descriptor;
     this.pageReader = pageReadStore.getPageReader(descriptor);
-    this.readState = new ParquetReadState(descriptor, isRequired, null);
+    this.readState = new ParquetReadState(descriptor, isRequired,
+      pageReadStore.getRowIndexes().orElse(null));
     this.readState.maxRepetitiveDefLevel = maxRepetitiveDefLevel;
-    this.originalType = descriptor.getPrimitiveType().getOriginalType();
+    this.logicalTypeAnnotation = descriptor.getPrimitiveType().getLogicalTypeAnnotation();
     this.updaterFactory = new ParquetVectorUpdaterFactory(
-      originalType,
+      logicalTypeAnnotation,
       convertTz,
       datetimeRebaseMode,
       datetimeRebaseTz,
@@ -231,7 +232,7 @@ public class VectorizedColumnReader implements Closeable {
     if (page == null) {
       return -1;
     }
-    this.pageFirstRowIndex = 0L;
+    this.pageFirstRowIndex = page.getFirstRowIndex().orElse(0L);
 
     return page.accept(new DataPage.Visitor<Integer>() {
       @Override

@@ -16,14 +16,14 @@
  */
 package org.apache.spark.sql.execution.datasources.parquet.rapids;
 
+import static org.apache.spark.sql.types.DataTypes.IntegerType;
+
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-
 import org.apache.parquet.bytes.ByteBufferInputStream;
 import org.apache.parquet.io.ParquetDecodingException;
-
-import org.apache.spark.sql.execution.vectorized.rapids.ParquetHelperVector;
+import org.apache.spark.sql.execution.vectorized.rapids.OnHeapColumnVector;
 import org.apache.spark.sql.execution.vectorized.rapids.WritableColumnVector;
 
 /**
@@ -44,7 +44,7 @@ public class VectorizedDeltaLengthByteArrayReader extends VectorizedReaderBase i
 
 	@Override
 	public void initFromPage(int valueCount, ByteBufferInputStream in) throws IOException {
-		lengthsVector = new ParquetHelperVector(valueCount, ParquetHelperVector.PinMode.SYSTEM_DEFAULT);
+		lengthsVector = new OnHeapColumnVector(valueCount, IntegerType);
 		lengthReader.initFromPage(valueCount, in);
 		lengthReader.readIntegers(lengthReader.getTotalValueCount(), lengthsVector, 0);
 		this.in = in.remainingStream();
@@ -78,16 +78,12 @@ public class VectorizedDeltaLengthByteArrayReader extends VectorizedReaderBase i
 
 	@Override
 	public void skipBinary(int total) {
-		try {
-			for (int i = 0; i < total; i++) {
-				int remaining = lengthsVector.getInt(currentRow + i);
-				while (remaining > 0) {
-					remaining -= in.skip(remaining);
-				}
+		for (int i = 0; i < total; i++) {
+			int remaining = lengthsVector.getInt(currentRow + i);
+			while (remaining > 0) {
+				remaining -= in.skip(remaining);
 			}
-			currentRow += total;
-		} catch (Exception e) {
-			throw new ParquetDecodingException("Failed to read from input stream", e);
 		}
+		currentRow += total;
 	}
 }
