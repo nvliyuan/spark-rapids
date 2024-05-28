@@ -19,6 +19,7 @@ package com.nvidia.spark.rapids
 import java.nio.ByteBuffer
 import java.nio.channels.{Channels, WritableByteChannel}
 import java.util.concurrent.{ConcurrentHashMap, Future, ScheduledExecutorService, TimeUnit}
+import java.util.regex.Pattern
 
 import scala.collection.mutable
 
@@ -35,7 +36,7 @@ import org.apache.spark.sql.rapids.execution.TrampolineUtil
 import org.apache.spark.util.SerializableConfiguration
 
 object ProfilerOnExecutor extends Logging {
-  private val jobPattern = raw"SPARK_.*_JId_([0-9]+).*".r
+  private val jobPattern = Pattern.compile("SPARK_.*_JId_([0-9]+).*")
   private var writer: Option[ProfileWriter] = None
   private var timeRanges: Option[Seq[(Long, Long)]] = None
   private var jobRanges: RangeConfMatcher = null
@@ -87,17 +88,16 @@ object ProfilerOnExecutor extends Logging {
     if (jobRanges.nonEmpty) {
       val callerCtx = CallerContext.getCurrent
       if (callerCtx != null) {
-        callerCtx.getContext match {
-          case jobPattern(jid) =>
-            val jobId = jid.toInt
-            if (jobRanges.contains(jobId)) {
-              synchronized {
-                activeJobs.add(jobId)
-                enable()
-                startPollingDriver()
-              }
+        val m = jobPattern.matcher(callerCtx.getContext)
+        if (m.matches()) {
+          val jobId = m.group(1).toInt
+          if (jobRanges.contains(jobId)) {
+            synchronized {
+              activeJobs.add(jobId)
+              enable()
+              startPollingDriver()
             }
-          case _ =>
+          }
         }
       }
     }
@@ -254,7 +254,7 @@ object ProfilerOnExecutor extends Logging {
 class ProfileWriter(
     val pluginCtx: PluginContext,
     profilePathPrefix: String,
-    codec: Option[CompressionCodec]) extends Profiler.DataWriter with Logging {
+    codec: Option[CompressionCodec]) extends Profiler.DataWriter {
   val executorId: String = pluginCtx.executorID()
   private val outPath = getOutputPath(profilePathPrefix, codec)
   private val out = openOutput(codec)
@@ -272,7 +272,6 @@ class ProfileWriter(
     if (!isClosed) {
       isClosed = true
       out.close()
-      logWarning(s"Profiling completed, output written to $outPath")
       pluginCtx.send(ProfileEndMsg(executorId, outPath.toString))
     }
   }
@@ -294,7 +293,6 @@ class ProfileWriter(
   }
 
   private def openOutput(codec: Option[CompressionCodec]): WritableByteChannel = {
-    logWarning(s"Profiler initialized, output will be written to $outPath")
     val hadoopConf = pluginCtx.ask(ProfileInitMsg(executorId, outPath.toString))
       .asInstanceOf[SerializableConfiguration].value
     val fs = outPath.getFileSystem(hadoopConf)
