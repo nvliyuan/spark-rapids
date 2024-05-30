@@ -380,7 +380,7 @@ case class GpuProjectExec(
  ) extends GpuProjectExecLike {
 
   // for testing purpose; used by dumping for replay feature
-  private val replayDumperOpt: Option[ReplayDumper] = if (dumpForReplay) {
+  private lazy val replayDumperOpt: Option[ReplayDumper] = if (dumpForReplay) {
     val spark = SparkSession.active
     val hadoopConf = new SerializableConfiguration(spark.sparkContext.hadoopConfiguration)
     val dumpDir = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_DUMP_DIR.key,
