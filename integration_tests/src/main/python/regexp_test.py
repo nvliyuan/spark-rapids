@@ -28,7 +28,7 @@ else:
     pytestmark = pytest.mark.regexp
 
 _regexp_conf = { 'spark.rapids.sql.regexp.enabled': True ,
-                'spark.rapids.sql.rLikeRegexRewrite.enabled': 'new'}
+                'spark.rapids.sql.rLikeRegexRewrite.enabled': True}
 
 def mk_str_gen(pattern):
     return StringGen(pattern).with_special_case('').with_special_pattern('.{0,10}')
