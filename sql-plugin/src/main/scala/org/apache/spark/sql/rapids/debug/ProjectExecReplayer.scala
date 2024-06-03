@@ -45,22 +45,23 @@ object ProjectExecReplayer extends Logging {
 
   /**
    * Replay data dir should contains, e.g.::
-   * - 1740344132_GpuTieredProject.meta
-   * - 1740344132_cb_types.meta
-   * - 1740344132_cb_data_0_744305176.parquet
-   * Here 1740344132 is hashCode for a Project.
+   * - 123e4567-e89b-12d3-a456-426655440000_GpuTieredProject.meta
+   * - 123e4567-e89b-12d3-a456-426655440000_cb_types.meta
+   * - 123e4567-e89b-12d3-a456-426655440000_cb_data_0_744305176.parquet
+   * Here 123e4567-e89b-12d3-a456-426655440000 is UUID for a Project.
    * Only replay one Parquet in the replay path
-   * @param args specify data path and hashCode, e.g.: /path/to/replay 1740344132
+   * @param args specify data path and project UUID, e.g.:
+   *   /path/to/replay 123e4567-e89b-12d3-a456-426655440000
    */
   def main(args: Array[String]): Unit = {
     // check arguments and get paths
     if (args.length < 2) {
-      logError("Project Exec replayer: Specify 2 args: data path and hashCode")
+      logError("Project Exec replayer: Specify 2 args: data path and projectUUID")
       printUsage()
       return
     }
     var replayDir = args(0)
-    val projectHash = args(1)
+    val projectUUID = args(1)
     logWarning("Project Exec replayer: start running.")
 
     // start a Spark session with Spark-Rapids initialization
@@ -74,13 +75,13 @@ object ProjectExecReplayer extends Logging {
     // copy to local dir
     replayDir = copyToLocal(replayDir)
 
-    val cbTypesPath = replayDir + s"/${projectHash}_cb_types.meta"
+    val cbTypesPath = replayDir + s"/${projectUUID}_cb_types.meta"
     if (!(new File(cbTypesPath).exists() && new File(cbTypesPath).isFile)) {
       logError(s"Project Exec replayer: there is no xxx_cb_types.meta file in $replayDir")
       printUsage()
       return
     }
-    val projectMetaPath = replayDir + s"/${projectHash}_GpuTieredProject.meta"
+    val projectMetaPath = replayDir + s"/${projectUUID}_GpuTieredProject.meta"
     if (!(new File(projectMetaPath).exists() && new File(projectMetaPath).isFile)) {
       logError(s"Project Exec replayer: " +
           s"there is no xxx_GpuTieredProject.meta file in $replayDir")
@@ -90,7 +91,7 @@ object ProjectExecReplayer extends Logging {
 
     // find a Parquet file, e.g.: xxx_cb_data_101656570.parquet
     val parquets = new File(replayDir).listFiles(
-      f => f.getName.startsWith(s"${projectHash}_cb_data_") &&
+      f => f.getName.startsWith(s"${projectUUID}_cb_data_") &&
           f.getName.endsWith(".parquet"))
     if (parquets == null || parquets.isEmpty) {
       logError(s"Project Exec replayer: " +
@@ -137,20 +138,20 @@ $SPARK_HOME/bin/spark-submit \
   --conf spark.rapids.sql.explain=ALL \
   --master local[*] \
   --jars ${PLUGIN_JAR} \
-  ${PLUGIN_JAR} <dumped path> <project hash code>
+  ${PLUGIN_JAR} <dumped path> <project UUID>
 e.g.:
 The files in dumped path(hdfs://host/path/to/dir) are:
-  938389771_GpuTieredProject.meta
-  938389771_cb_types.meta
-  938389771_cb_data_0_1140517444.parquet
-The project hash code is the file prefix: `938389771`
+  123e4567-e89b-12d3-a456-426655440000_GpuTieredProject.meta
+  123e4567-e89b-12d3-a456-426655440000_cb_types.meta
+  123e4567-e89b-12d3-a456-426655440000_cb_data_0_1140517444.parquet
+The project UUID is the file prefix: `123e4567-e89b-12d3-a456-426655440000`
 The command will be:
 $SPARK_HOME/bin/spark-submit \
   --class org.apache.spark.sql.rapids.test.ProjectExecReplayer \
   --conf spark.rapids.sql.explain=ALL \
   --master local[*] \
   --jars ${PLUGIN_JAR} \
-  ${PLUGIN_JAR} hdfs://host/path/to/dir 938389771
+  ${PLUGIN_JAR} hdfs://host/path/to/dir 123e4567-e89b-12d3-a456-426655440000
 Note:
   dumped path could be remote path or local path, e.g.:
    hdfs://host/path/to/dir

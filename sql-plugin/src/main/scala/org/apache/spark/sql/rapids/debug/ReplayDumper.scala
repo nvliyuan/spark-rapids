@@ -40,7 +40,7 @@ case class ReplayDumper(
     dumpDir: String,
     thresholdMS: Int,
     batchLimit: Int,
-    execHashCode: Int
+    execUUID: String
 ) extends Logging {
 
   // current dumped number
@@ -50,12 +50,12 @@ case class ReplayDumper(
     val hadoopPath = new Path(filePath)
     val fs = hadoopPath.getFileSystem(hadoopConf.value)
     // multiple may call this concurrently, make overwrite as true
-    fs.create(hadoopPath, true)
+    fs.create(hadoopPath, false)
   }
 
   def dumpMeta[T: ClassTag](metaName: String, obj: T): Unit = {
     val byteBuff = SparkEnv.get.closureSerializer.newInstance().serialize[T](obj)
-    val fos = getOutputStream(s"$dumpDir/${execHashCode}_$metaName.meta")
+    val fos = getOutputStream(s"$dumpDir/${execUUID}_$metaName.meta")
     fos.write(byteBuff.array())
     fos.close()
     logWarning(s"dump project: dump project meta $metaName done")
@@ -73,7 +73,7 @@ case class ReplayDumper(
         logWarning(s"dump project: dump dir is $dumpDir")
         logWarning(s"dump project: threshold MS is $thresholdMS")
         logWarning(s"dump project: batch limit is $batchLimit")
-        logWarning(s"dump project: execHashCode $execHashCode")
+        logWarning(s"dump project: execUUID $execUUID")
 
         // dump col types for column batch to remote storage
         val cbTypes = GpuColumnVector.extractTypes(cb)
@@ -84,7 +84,7 @@ case class ReplayDumper(
         val tmpDir = "/tmp"
         val tmpParquetPathOpt = withResource(GpuColumnVector.from(cb)) { table =>
           DumpUtils.dumpToParquetFile(table, filePrefix = s"$tmpDir/" +
-              s"${execHashCode}_cb_data_${currBatchIndex}_")
+              s"${execUUID}_cb_data_${currBatchIndex}_")
         }
         // copy from /tmp dir to remote dir
         tmpParquetPathOpt.map { tmpParquetPath =>

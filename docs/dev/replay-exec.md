@@ -12,7 +12,7 @@ mvn clean install -DskipTests -pl dist -am -DallowConventionalDistJar=true -Dbui
 ```
 Note: Should specify `-DallowConventionalDistJar`, this config will make sure to generate a
 conventional jar. If you do not specify this config, then replay will fail because of can not
-find the class `com.nvidia.spark.rapids.debug.ProjectExecReplayer`
+find the class `org.apache.spark.sql.rapids.debug.ProjectExecReplayer`
 
 ## enable dump
 This assumes that the RAPIDs Accelerator has already been enabled.   
@@ -56,7 +56,7 @@ After the job is done, check the dump path will have files like:
   - xxx_cb_types.meta              // this is types for column batch
   - xxx_cb_data_0_101656570.parquet  // this is data for column batch
 ```
-The prefix `xxx` is the hash code for a specific Project Exec, this is used to distinguish multiple
+The prefix `xxx` is the UUID for a specific Project Exec, this is used to distinguish multiple
 Project Execs.
 
 # Replay saved Exec runtime meta and data
@@ -72,15 +72,14 @@ export SPARK_HOME=path_to_spark_home_330
 ### Collect NSYS with replaying
 ```
 nsys profile $SPARK_HOME/bin/spark-submit \
-  --class com.nvidia.spark.rapids.debug.ProjectExecReplayer \
+  --class org.apache.spark.sql.rapids.debug.ProjectExecReplayer \
   --conf spark.rapids.sql.explain=ALL \
   --master local[*] \
   --jars ${PLUGIN_JAR} \
-  ${PLUGIN_JAR} <path_to_saved_replay_dir> <hash_code_of_project_exec>
+  ${PLUGIN_JAR} <path_to_saved_replay_dir> <UUID_of_project_exec>
 ```
 
-<path_to_saved_replay_dir> is the replay directory   
-<hash_code_of_project_exec> is the hash code for a specific Project Exec. Dumping may generate
+<path_to_saved_replay_dir> is the replay directory.   
+<UUID_of_project_exec> is the UUID for a specific Project Exec. Dumping may generate
 multiple data for each project, here should specify replay which project.   
-The replaying only replay one column batch, if there are multiple column batches for a project, it
-will only replay the first column batch.
+If there are multiple column batches for a project, it will only replay the first column batch.

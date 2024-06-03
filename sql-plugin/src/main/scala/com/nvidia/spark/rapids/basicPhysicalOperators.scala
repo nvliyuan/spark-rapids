@@ -16,6 +16,8 @@
 
 package com.nvidia.spark.rapids
 
+import java.util.UUID
+
 import scala.annotation.tailrec
 import scala.collection.mutable.ArrayBuffer
 
@@ -28,8 +30,8 @@ import com.nvidia.spark.rapids.RapidsPluginImplicits._
 import com.nvidia.spark.rapids.RmmRapidsRetryIterator.{splitSpillableInHalfByRows, withRestoreOnRetry, withRetry, withRetryNoSplit}
 import com.nvidia.spark.rapids.jni.GpuSplitAndRetryOOM
 import com.nvidia.spark.rapids.shims._
-
 import org.apache.spark.{InterruptibleIterator, Partition, SparkContext, TaskContext}
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
@@ -389,8 +391,8 @@ case class GpuProjectExec(
       defaultValue = "1000").toInt
     val batchLimit = conf.getConfString(RapidsConf.TEST_REPLAY_EXEC_BATCH_LIMIT.key,
       defaultValue = "1").toInt
-    val projectHashCode = Math.abs(this.hashCode())
-    Some(ReplayDumper(hadoopConf, dumpDir, thresholdMS, batchLimit, projectHashCode))
+    val projectUUID = UUID.randomUUID().toString
+    Some(ReplayDumper(hadoopConf, dumpDir, thresholdMS, batchLimit, projectUUID))
   } else {
     None
   }
