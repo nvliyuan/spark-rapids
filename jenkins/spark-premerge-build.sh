@@ -205,10 +205,6 @@ ci_scala213() {
     cd .. # Run integration tests in the project root dir to leverage test cases and resource files
     export TEST_TAGS="not premerge_ci_1"
     export TEST_TYPE="pre-commit"
-<<<<<<< HEAD
-=======
-    export TEST_PARALLEL=4
->>>>>>> ac4801bc6 (workaround for  ci_scala213)
     # SPARK_HOME (and related) must be set to a Spark built with Scala 2.13
     SPARK_HOME=$SPARK_HOME PYTHONPATH=$PYTHONPATH \
         ./integration_tests/run_pyspark_from_build.sh
