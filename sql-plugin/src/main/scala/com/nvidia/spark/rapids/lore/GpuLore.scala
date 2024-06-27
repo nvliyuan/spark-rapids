@@ -40,7 +40,7 @@ case class LoreRDDMeta(numPartitions: Int, outputPartitions: Seq[Int], attrs: Se
 case class LoreRDDPartitionMeta(numBatches: Int, dataType: Seq[DataType])
 
 trait GpuLoreRDD {
-  val rootPath: Path
+  def rootPath: Path
 
   def pathOfMeta: Path = new Path(rootPath, "rdd.meta")
 
@@ -187,7 +187,7 @@ object GpuLore {
                 val currentExecRootPath = new Path(loreOutputRootPath, s"loreId-$loreId")
                 g.setTagValue(LORE_DUMP_PATH_TAG, currentExecRootPath.toString)
                 val loreOutputInfo = LoreOutputInfo(outputLoreIds,
-                  currentExecRootPath)
+                  currentExecRootPath.toString)
 
                 g.children.zipWithIndex.foreach {
                   case (child, idx) =>
