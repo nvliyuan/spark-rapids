@@ -210,6 +210,8 @@ case class GpuInsertIntoHiveTable(
       // column names in order to make `loadDynamicPartitions` work.
       attr.withName(name.toLowerCase(Locale.ROOT))
     }
+    val forceHiveHashForBucketing =
+      RapidsConf.FORCE_HIVE_HASH_FOR_BUCKETED_WRITE.get(sparkSession.sessionState.conf)
 
     val writtenParts = gpuSaveAsHiveFile(
       sparkSession = sparkSession,
@@ -217,8 +219,9 @@ case class GpuInsertIntoHiveTable(
       hadoopConf = hadoopConf,
       fileFormat = fileFormat,
       outputLocation = tmpLocation.toString,
+      forceHiveHashForBucketing = forceHiveHashForBucketing,
       partitionAttributes = partitionAttributes,
-      bucketSpec = table.bucketSpec,
+      bucketSpec = GpuBucketingUtils.getBucketSpec(table, forceHiveHashForBucketing),
       options = GpuBucketingUtils.getOptionsWithHiveBucketWrite(table.bucketSpec))
 
     if (partition.nonEmpty) {
