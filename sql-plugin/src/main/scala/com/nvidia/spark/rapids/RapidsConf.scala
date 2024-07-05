@@ -1522,14 +1522,14 @@ val GPU_COREDUMP_PIPE_PATTERN = conf("spark.rapids.gpu.coreDump.pipePattern")
         "Setting this to 1 essentially disables this feature.")
     .doubleConf
     .checkValue(v => v >= 0 && v <= 1, "The ratio value must be in [0, 1].")
-    .createWithDefault(1.0)
+    .createWithDefault(0.9)
 
   val FALLBACK_ALGORITHM_FOR_OVERSIZE_AGG = conf("spark.rapids.sql.agg.fallbackAlgorithm")
     .doc("When agg cannot be done in a single pass, use sort-based fallback or " +
       "repartition-based fallback.")
     .stringConf
     .checkValues(Set("sort", "repartition"))
-    .createWithDefault("sort")
+    .createWithDefault("repartition")
 
   object AggFallbackAlgorithm extends Enumeration {
     val SORT, REPARTITION = Value
@@ -1870,7 +1870,7 @@ val SHUFFLE_COMPRESSION_LZ4_CHUNK_SIZE = conf("spark.rapids.shuffle.compression.
         "used to align with some customized Spark binaries before 330.")
       .internal()
       .booleanConf
-      .createWithDefault(false)
+      .createWithDefault(true)
 
   val SHUFFLE_MULTITHREADED_MAX_BYTES_IN_FLIGHT =
     conf("spark.rapids.shuffle.multiThreaded.maxBytesInFlight")
